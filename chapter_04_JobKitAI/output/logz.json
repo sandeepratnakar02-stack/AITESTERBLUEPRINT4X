@@ -1,0 +1,110 @@
+{
+  "name": "Sandeep Ratnakar",
+  "titleLine": [
+    { "text": "Quality Assurance Automation Engineer", "bold": true, "hl": true },
+    { "text": "  |  Senior QA & Test Automation Engineer", "grey": true }
+  ],
+  "contact": "+91 98737 31274   |   Sandeep.Ratnakar@hotmail.com   |   Gurgaon, India",
+  "summary": [
+    [ { "text": "9+ years in Software Testing & QA across E-commerce, Insurance, and ERP domains, with 5+ years focused on test automation." } ],
+    [ { "text": "Built and currently own a Page Object Model " }, { "text": "automation framework", "hl": true }, { "text": " in Ruby with Cucumber (BDD), integrated into Jenkins CI/CD pipelines." } ],
+    [ { "text": "Manage " }, { "text": "CI/CD pipeline health", "hl": true }, { "text": " end-to-end \u2014 triaging failures and unblocking merges so releases stay on schedule." } ],
+    [ { "text": "Skilled in " }, { "text": "API testing (Postman + Ruby)", "hl": true }, { "text": " and SQL/DB validation, with parallel execution via Selenium Grid to shorten regression cycles." } ],
+    [ { "text": "Experienced in " }, { "text": "Selenium WebDriver automation", "hl": true }, { "text": " and regression/integration testing across E-commerce and ERP web platforms." } ],
+    [ { "text": "Strong foundation in functional, regression, integration, and non-functional testing, with a track record of embedding QA early in the SDLC." } ]
+  ],
+  "competencies": [
+    { "text": "Test Automation Framework Design", "hl": true },
+    { "text": "CI/CD Pipeline Management", "hl": true },
+    { "text": "API & Database Testing" },
+    { "text": "Regression & Integration Testing" },
+    { "text": "Defect Management & Triage" }
+  ],
+  "skillsTable": [
+    { "area": "Languages", "skills": "Java, Ruby" },
+    { "area": "Automation Tools", "skills": "Selenium WebDriver, Cucumber (BDD)" },
+    { "area": "CI/CD & Version Control", "skills": "Jenkins, GOCD, GIT, Selenium Grid", "hlArea": true },
+    { "area": "API & DB Testing", "skills": "Postman, SQL, MySQL" },
+    { "area": "Operating Systems", "skills": "Windows, Linux (Ubuntu)" }
+  ],
+  "experience": [
+    {
+      "title": "Sr. QA Engineer",
+      "company": "Aimbeyond Infotech Pvt. Ltd.",
+      "hlTitle": false,
+      "dates": "November 2015 \u2013 Present",
+      "note": null,
+      "projects": [
+        {
+          "name": "Project: Brightpearl (UK) \u2014 SaaS business-management platform (accounting, CRM, inventory, e-commerce, POS, purchasing)",
+          "environment": "E-commerce, Linux, Cucumber, Ruby, API Testing, Jira",
+          "bullets": [
+            [ { "text": "Design and build the Page Object Model " }, { "text": "automation framework", "hl": true }, { "text": " in Ruby/Cucumber, cutting manual regression effort by automating core UI journeys." } ],
+            [ { "text": "Own the " }, { "text": "Jenkins CI/CD test pipeline", "hl": true }, { "text": " \u2014 diagnosing failures, fixing broken tests, and unblocking merges to keep release cadence on track." } ],
+            [ { "text": "Automate portal UI coverage using Cucumber and Ruby on the Page Object Model framework, and run performance checks on key endpoints using JMeter." } ],
+            [ { "text": "Validate " }, { "text": "APIs and backend data", "hl": true }, { "text": " with Postman and Ruby, alongside SQL/MySQL database validation." } ],
+            [ { "text": "Lead GUI, system, integration, compatibility, retesting, and regression cycles while managing task allocation across the QA team." } ]
+          ]
+        }
+      ]
+    },
+    {
+      "title": "QA Senior Engineer",
+      "company": "G4S, Gurgaon",
+      "hlTitle": false,
+      "dates": "June 2015 \u2013 September 2015",
+      "note": null,
+      "projects": [
+        {
+          "name": "Project: SATURN \u2014 Web + mobile attendance system using NFC technology for security-officer tracking",
+          "environment": "SharePoint, .NET Framework 1.1/2.0, IIS 7.0, Selenium WebDriver, SQL Server",
+          "bullets": [
+            [ { "text": "Executed automated web-application test cases using Selenium WebDriver for regression coverage.", "hl": true } ],
+            [ { "text": "Prepared and executed test cases validating web services against evolving application architecture, including full regression harnesses." } ],
+            [ { "text": "Analyzed test execution results and their downstream application impact, logging and tracking defects through resolution." } ],
+            [ { "text": "Delivered daily status reports to the client and ran daily status calls to keep stakeholders aligned on test progress." } ]
+          ]
+        }
+      ]
+    },
+    {
+      "title": "Advanced Test Engineer \u2192 Test Engineer",
+      "company": "Xchanging Technology, Gurgaon",
+      "hlTitle": false,
+      "dates": "November 2008 \u2013 March 2015",
+      "note": "Delivered QA across three concurrent Insurance-domain platforms for this long-term client engagement:",
+      "projects": [
+        {
+          "name": "IRIS Web Services \u2014 Insurance & reinsurance policy management platform (Marine, Non-Marine, Aviation)",
+          "environment": "SOA Web Services, SharePoint, iSeries AS400/OS400, .NET 1.1/2.0, IIS 7.0, Selenium WebDriver",
+          "bullets": [
+            [ { "text": "Served as Subject Matter Expert for SOA web-service testing across multiple concurrent projects." } ],
+            [ { "text": "Prepared and executed regression test harnesses for web services following architecture changes, and analyzed downstream impact." } ],
+            [ { "text": "Ran daily client status calls and delivered daily test status reporting throughout the engagement." } ]
+          ]
+        },
+        {
+          "name": "Brokasure Enterprise \u2014 End-to-end insurance broking application",
+          "environment": "SQL Server 2008, Silverlight, VBA, COBOL",
+          "bullets": [
+            [ { "text": "Delivered weekly status reports and quality metrics to onshore and offshore senior management." } ],
+            [ { "text": "Translated support tickets into business, functional, and technical specifications for the development team." } ],
+            [ { "text": "Built and maintained requirements traceability matrices, mapping test cases to requirements in QC/Bugnet." } ]
+          ]
+        },
+        {
+          "name": "Brokasure Desktop \u2014 Insurance lifecycle platform (quotes, policies, transactions, claims)",
+          "environment": "VB6, Tomcat, Unix, COBOL",
+          "bullets": [
+            [ { "text": "Coordinated a 10-member SME insurance testing team, covering work allocation, issue tracking, and defect triage with UK counterparts." } ],
+            [ { "text": "Estimated effort and business impact for change requests raised by stakeholders." } ],
+            [ { "text": "Designed and executed test cases across high-level (business scenario) and low-level (test step/data) tiers, and validated data integrity via SQL." } ]
+          ]
+        }
+      ]
+    }
+  ],
+  "education": [
+    { "text": "Bachelor of Technology \u2014 Galgotia College of Engineering and Technology, 2007" }
+  ]
+}
