@@ -208,6 +208,39 @@ NEXT_PUBLIC_N8N_UI_URL=https://<your-instance>.app.n8n.cloud
 6. **Optional:** set the function region (Project → Settings → Functions) close to your n8n
    instance to cut latency.
 
+### Serverless duration limit — required on Vercel
+
+A cold dashboard fans out to 4–5 n8n webhooks, and with a paused/idle n8n Cloud instance the
+measured first render was **~13 s** (warm: ~3 s). Vercel's default serverless limit is **10 s**,
+so without configuration the first load after idle returns **504**.
+
+The app already declares a budget:
+
+```ts
+// src/app/layout.tsx  (covers every page)
+export const maxDuration = 60;
+
+// each src/app/api/**/route.ts
+export const maxDuration = 60;
+```
+
+Keep `maxDuration` **comfortably above `N8N_TIMEOUT_MS`**. That ordering is what lets the
+application's own timeout + mock fallback run and still render a page, instead of the platform
+killing the request mid-flight:
+
+| Setting | Value | Why |
+| --- | --- | --- |
+| `N8N_TIMEOUT_MS` | `30000` | Absorbs n8n Cloud cold starts (~13 s observed, single calls up to ~6 s) |
+| `maxDuration` | `60` | Leaves the app ~30 s of headroom after its own timeout fires |
+
+If your plan caps the duration below 60 s, Vercel reports it at deploy time — lower **both**
+values together (e.g. `N8N_TIMEOUT_MS=20000` with `maxDuration=30`) rather than only one.
+
+**Reducing the need for it:** the latency comes from uncached fan-out on every render. Wrapping the
+`lib/api.ts` reads in `unstable_cache(..., { revalidate: 30 })` would make repeat loads instant and
+cut function cost, at the price of up-to-30-second-old data. Worth doing if the cold-start delay
+becomes annoying.
+
 ### n8n must be publicly reachable
 
 `N8N_BASE_URL` is called *from Vercel*, so `http://localhost:5678` cannot work. Options:

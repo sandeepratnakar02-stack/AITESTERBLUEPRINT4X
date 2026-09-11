@@ -31,6 +31,13 @@ import { formatPercent, formatResponseTime } from "@/lib/format";
 
 export const metadata: Metadata = { title: "Dashboard" };
 
+/**
+ * The dashboard is the heaviest route (5 parallel n8n calls). Declared here as
+ * well as on the root layout so the budget does not depend on layout
+ * propagation — a cold n8n Cloud instance measured ~13 s.
+ */
+export const maxDuration = 60;
+
 interface DashboardPageProps {
   searchParams: Promise<{ env?: string }>;
 }

@@ -4,6 +4,9 @@ import type { DashboardSettings } from "@/types";
 
 export const dynamic = "force-dynamic";
 
+/** Allows a cold n8n instance to wake up before the platform kills the request. */
+export const maxDuration = 60;
+
 /**
  * `GET /api/settings` — current threshold / retry / environment configuration.
  * `POST /api/settings` — persist it through the n8n `POST /settings-write` webhook.

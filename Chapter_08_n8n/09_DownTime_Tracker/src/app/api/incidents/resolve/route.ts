@@ -3,6 +3,9 @@ import { resolveIncident } from "@/lib/api";
 
 export const dynamic = "force-dynamic";
 
+/** Allows a cold n8n instance to wake up before the platform kills the request. */
+export const maxDuration = 60;
+
 /**
  * `POST /api/incidents/resolve`
  *

@@ -29,6 +29,18 @@ const N8N_WEBHOOK_PATH = (process.env.N8N_WEBHOOK_PATH ?? "webhook").replace(/^\
 const N8N_API_KEY = process.env.N8N_API_KEY ?? "";
 const REQUEST_TIMEOUT_MS = Number(process.env.N8N_TIMEOUT_MS ?? 10_000);
 
+/**
+ * Optional per-endpoint URL overrides, keyed by webhook path.
+ *
+ * When one is set it wins over the `N8N_BASE_URL` + `N8N_WEBHOOK_PATH` scheme,
+ * so a workflow can expose a ready-made URL (query string included) without the
+ * rest of the config having to change. Missing overrides fall back silently.
+ */
+const ENDPOINT_URL_OVERRIDES: Record<string, string | undefined> = {
+  incidents: process.env.N8N_INCIDENTS_URL,
+  "incidents-resolve": process.env.N8N_RESOLVE_INCIDENT_URL,
+};
+
 export class N8nError extends Error {
   constructor(
     message: string,
@@ -39,18 +51,39 @@ export class N8nError extends Error {
   }
 }
 
-/** Builds `https://n8n.example.com/webhook/<path>?<query>` (server-side only). */
+/**
+ * Builds the URL for a webhook path (server-side only).
+ *
+ * Uses the per-endpoint override when configured, otherwise
+ * `https://n8n.example.com/webhook/<path>`. Query parameters are merged into
+ * whatever the resulting URL already carries, so an override such as
+ * `.../incidents?environment=QA` keeps working.
+ */
 export function n8nWebhookUrl(path: string, query?: Record<string, string | undefined>): string {
   const clean = path.replace(/^\//, "");
-  const base = `${N8N_BASE_URL}/${N8N_WEBHOOK_PATH}`;
-  const search = new URLSearchParams();
-  if (query) {
-    for (const [key, value] of Object.entries(query)) {
-      if (value !== undefined && value !== "") search.set(key, value);
-    }
+  const override = ENDPOINT_URL_OVERRIDES[clean]?.trim();
+  const target = override ? override : `${N8N_BASE_URL}/${N8N_WEBHOOK_PATH}/${clean}`;
+
+  return appendQuery(target, query);
+}
+
+/** Merges query parameters into a URL, tolerating non-absolute values. */
+function appendQuery(url: string, query?: Record<string, string | undefined>): string {
+  const entries = Object.entries(query ?? {}).filter(
+    ([, value]) => value !== undefined && value !== "",
+  );
+  if (entries.length === 0) return url;
+
+  try {
+    const parsed = new URL(url);
+    for (const [key, value] of entries) parsed.searchParams.set(key, String(value));
+    return parsed.toString();
+  } catch {
+    // Not an absolute URL — fall back to manual concatenation.
+    const search = new URLSearchParams();
+    for (const [key, value] of entries) search.set(key, String(value));
+    return `${url}${url.includes("?") ? "&" : "?"}${search.toString()}`;
   }
-  const qs = search.toString();
-  return qs ? `${base}/${clean}?${qs}` : `${base}/${clean}`;
 }
 
 interface N8nRequestOptions {
@@ -59,23 +92,56 @@ interface N8nRequestOptions {
   body?: unknown;
 }
 
+/** Transient-failure tolerance: one retry after a short backoff. */
+const RETRY_DELAY_MS = 750;
+
+function sleep(ms: number) {
+  return new Promise<void>((resolve) => setTimeout(resolve, ms));
+}
+
 /**
  * Calls an n8n webhook and parses the JSON response.
  * Throws `N8nError` for transport/HTTP failures so callers can decide whether
  * to fall back to the bundled mock dataset.
+ *
+ * A single retry is applied to GETs that fail at the network level (DNS hiccup,
+ * cold-start connection reset). Writes are never retried — re-sending a
+ * `health-check` or `incidents-resolve` could double-trigger the workflow — and
+ * HTTP error responses are not retried either, since they will not improve.
  */
 export async function n8nFetch<T>(path: string, options: N8nRequestOptions = {}): Promise<T> {
-  const { method = "GET", query, body } = options;
+  const { method = "GET" } = options;
+  const maxAttempts = method === "GET" ? 2 : 1;
 
-  if (!N8N_BASE_URL) {
-    throw new N8nError("N8N_BASE_URL is not configured");
+  for (let attempt = 1; ; attempt += 1) {
+    try {
+      return await requestOnce<T>(path, options);
+    } catch (error) {
+      const retryable = error instanceof N8nError && error.status === undefined;
+      if (attempt >= maxAttempts || !retryable) throw error;
+
+      console.warn(`[vwo-qa] retrying "${path}" after transient failure: ${(error as Error).message}`);
+      await sleep(RETRY_DELAY_MS * attempt);
+    }
+  }
+}
+
+/** One HTTP round trip. */
+async function requestOnce<T>(path: string, options: N8nRequestOptions): Promise<T> {
+  const { method = "GET", query, body } = options;
+  const target = n8nWebhookUrl(path, query);
+
+  if (!/^https?:\/\//i.test(target)) {
+    throw new N8nError(
+      `No n8n URL configured for "${path}" (set N8N_BASE_URL or a per-endpoint override)`,
+    );
   }
 
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
 
   try {
-    const response = await fetch(n8nWebhookUrl(path, query), {
+    const response = await fetch(target, {
       method,
       headers: {
         Accept: "application/json",
