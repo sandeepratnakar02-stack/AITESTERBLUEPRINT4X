@@ -1,0 +1,353 @@
+{
+  "name": "07_Social_Post_Generator",
+  "nodes": [
+    {
+      "parameters": {
+        "options": {}
+      },
+      "id": "4f388652-8d72-491c-bc2e-1dfcdb50c211",
+      "name": "When chat message received",
+      "type": "@n8n/n8n-nodes-langchain.chatTrigger",
+      "typeVersion": 1.4,
+      "position": [
+        -560,
+        -64
+      ],
+      "webhookId": "47772817-82f9-4d48-a90e-7711e874fc8c"
+    },
+    {
+      "parameters": {
+        "hasOutputParser": true,
+        "options": {
+          "systemMessage": "Generate one fresh, specific LinkedIn post topic for a software testing and AI-in-QA audience. Avoid generic themes. Return the topic, a one-line angle, and the target reader.\nYou are a content strategist for a software testing community. Output only what the schema asks for."
+        }
+      },
+      "id": "9e930e37-2d4b-4f2e-81ab-687f762b87c3",
+      "name": "Content Topic Generator",
+      "type": "@n8n/n8n-nodes-langchain.agent",
+      "typeVersion": 3.1,
+      "position": [
+        -368,
+        -48
+      ]
+    },
+    {
+      "parameters": {
+        "options": {}
+      },
+      "id": "5ac3c44c-d86a-486f-8185-de2a93a7aff9",
+      "name": "Google Gemini Chat Model",
+      "type": "@n8n/n8n-nodes-langchain.lmChatGoogleGemini",
+      "typeVersion": 1.1,
+      "position": [
+        -448,
+        112
+      ],
+      "credentials": {
+        "googlePalmApi": {
+          "id": null,
+          "name": "",
+          "__aiGatewayManaged": true
+        }
+      }
+    },
+    {
+      "parameters": {
+        "schemaType": "manual",
+        "inputSchema": "{\n  \"type\": \"Object\",\n  \"properties\": {\n\t\"topic\": { \"type\": \"string\" },\n    \"angle\": { \"type\": \"string\" },\n    \"audience\": { \"type\": \"string\" }\n  },\n  \"required\": [\"topic\", \"angle\", \"audience\"]\n}"
+      },
+      "id": "c608139b-cafe-4484-971f-ad859c4aa1da",
+      "name": "Structured Output Parser",
+      "type": "@n8n/n8n-nodes-langchain.outputParserStructured",
+      "typeVersion": 1.3,
+      "position": [
+        -208,
+        128
+      ]
+    },
+    {
+      "parameters": {
+        "promptType": "define",
+        "text": "=Write a Linkedin Post\n\nTopic:{{ $json.output.topic }}\nAngle:{{ $json.output.angle }}\nAudience: {{ $json.output.target_reader }}\n\nRules: no contractions, no emojis, plain declarative sentences, short paragraphs, one cleartakeaway, 150-250 words. Also produce a post title and a one-sentence image prompt describing a clean technical illustration for this post.",
+        "hasOutputParser": true,
+        "options": {
+          "systemMessage": "You write Linkedin posts for a software testing audience. Return only the fields required by the schema."
+        }
+      },
+      "id": "56e7d5e9-69b2-44ba-9b95-b09402f75142",
+      "name": "Content Creator (Linkedin Post)",
+      "type": "@n8n/n8n-nodes-langchain.agent",
+      "typeVersion": 3.1,
+      "position": [
+        0,
+        -48
+      ]
+    },
+    {
+      "parameters": {
+        "model": {
+          "__rl": true,
+          "mode": "list",
+          "value": "gpt-5-mini"
+        },
+        "builtInTools": {},
+        "options": {}
+      },
+      "id": "6ee69a5b-3a44-4152-9ac1-a371acbac295",
+      "name": "OpenAI Chat Model",
+      "type": "@n8n/n8n-nodes-langchain.lmChatOpenAi",
+      "typeVersion": 1.3,
+      "position": [
+        -16,
+        176
+      ],
+      "credentials": {
+        "openAiApi": {
+          "id": "OVDLMxjt3R9QJLoU",
+          "name": "n8n free OpenAI API credits"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://router.huggingface.co/hf-inference/models/stabilityai/stable-diffusion-3-medium-diffusers",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "huggingFaceApi",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            },
+            {
+              "name": "Accept",
+              "value": "image/png"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"inputs\": {{ JSON.stringify($json.output.image_prompt) }},\n  \"parameters\": {\n    \"width\": 1024,\n    \"height\": 1024,\n    \"num_inference_steps\": 28,\n    \"guidance_scale\": 7\n  }\n}",
+        "options": {
+          "response": {
+            "response": {
+              "responseFormat": "file"
+            }
+          }
+        }
+      },
+      "id": "6e40436b-380c-4ffb-8ea6-c3ad7425355e",
+      "name": "HTTP Request",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.5,
+      "position": [
+        368,
+        -48
+      ],
+      "credentials": {
+        "huggingFaceApi": {
+          "id": "ifYh7o5k7sYk8eBh",
+          "name": "Hugging Face account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "content": "##Trigger",
+        "color": 2
+      },
+      "id": "40a4a769-ad7a-46b9-93f7-27b9b002ea60",
+      "name": "Sticky Note",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        -496,
+        -304
+      ]
+    },
+    {
+      "parameters": {
+        "content": "## Actions",
+        "color": 4
+      },
+      "id": "bfc3f988-1c9a-421c-a27f-0eb3c53912d5",
+      "name": "Sticky Note1",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        -80,
+        -304
+      ]
+    },
+    {
+      "parameters": {
+        "content": "## Results"
+      },
+      "id": "17690cb3-44b2-4cfb-a7a2-f696afd3da6d",
+      "name": "Sticky Note2",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        320,
+        -304
+      ]
+    },
+    {
+      "parameters": {
+        "schemaType": "manual",
+        "inputSchema": "{\n  \"type\": \"object\",\n  \"properties\": {\n    \"post_title\": {\n      \"type\": \"string\"\n    },\n    \"post_body\": {\n      \"type\": \"string\"\n    },\n    \"hash_tags\": {\n      \"type\": \"string\"\n    },\n    \"image_prompt\": {\n      \"type\": \"string\"\n    },\n    \"takeaway\": {\n      \"type\": \"string\"\n    }\n  },\n  \"required\": [\n    \"post_title\",\n    \"post_body\",\n    \"hash_tags\",\n    \"image_prompt\",\n    \"takeaway\"\n  ]\n}"
+      },
+      "type": "@n8n/n8n-nodes-langchain.outputParserStructured",
+      "typeVersion": 1.3,
+      "position": [
+        176,
+        160
+      ],
+      "id": "98f532c9-a41a-4e78-b1fe-da4bd1661616",
+      "name": "Structured Output Parser1"
+    },
+    {
+      "parameters": {
+        "person": "8H6Fa_8ubw",
+        "text": "={{ $('Content Creator (Linkedin Post)').item.json.output.post_body }}",
+        "shareMediaCategory": "IMAGE",
+        "additionalFields": {}
+      },
+      "type": "n8n-nodes-base.linkedIn",
+      "typeVersion": 1,
+      "position": [
+        592,
+        -16
+      ],
+      "id": "15425072-0426-4368-a0fa-6ba8062c3f43",
+      "name": "Create a post",
+      "credentials": {
+        "linkedInOAuth2Api": {
+          "id": "wLYeqA1ROhyav2GF",
+          "name": "LinkedIn account"
+        }
+      }
+    }
+  ],
+  "pinData": {
+    "Content Topic Generator": [
+      {
+        "json": {
+          "output": {
+            "topic": "Validating LLM Reliability via Metamorphic Testing",
+            "angle": "Stop trying to assert exact string matches in AI responses; learn how to test non-deterministic outputs by validating the relationship between varying inputs instead.",
+            "target_reader": "Senior SDETs and QA Architects tasked with automating the testing of Generative AI integrations."
+          }
+        },
+        "pairedItem": {
+          "item": 0
+        }
+      }
+    ]
+  },
+  "connections": {
+    "When chat message received": {
+      "main": [
+        [
+          {
+            "node": "Content Topic Generator",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Content Topic Generator": {
+      "main": [
+        [
+          {
+            "node": "Content Creator (Linkedin Post)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Google Gemini Chat Model": {
+      "ai_languageModel": [
+        [
+          {
+            "node": "Content Topic Generator",
+            "type": "ai_languageModel",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Structured Output Parser": {
+      "ai_outputParser": [
+        [
+          {
+            "node": "Content Topic Generator",
+            "type": "ai_outputParser",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Content Creator (Linkedin Post)": {
+      "main": [
+        [
+          {
+            "node": "HTTP Request",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "OpenAI Chat Model": {
+      "ai_languageModel": [
+        [
+          {
+            "node": "Content Creator (Linkedin Post)",
+            "type": "ai_languageModel",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Structured Output Parser1": {
+      "ai_outputParser": [
+        [
+          {
+            "node": "Content Creator (Linkedin Post)",
+            "type": "ai_outputParser",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "HTTP Request": {
+      "main": [
+        [
+          {
+            "node": "Create a post",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "binaryMode": "separate"
+  },
+  "versionId": "b88f612a-3fb1-4afb-aa59-cf76fd89afbf",
+  "meta": {
+    "templateCredsSetupCompleted": true,
+    "instanceId": "9161cf1ee5c8e758097448556afd72c9ef4603bb9e07bbc88bd89068d7db8d86"
+  },
+  "nodeGroups": [],
+  "id": "3AiGQVz8ECsaFlTD",
+  "tags": []
+}
