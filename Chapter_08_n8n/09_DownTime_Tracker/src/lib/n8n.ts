@@ -15,19 +15,18 @@ import "server-only";
  *   N8N_WEBHOOK_PATH   "webhook" (prod) | "webhook-test" (editor testing)
  *   N8N_API_KEY        optional, sent as the `x-api-key` header
  *   USE_LIVE_DATA      "true" to read from n8n instead of the mock dataset
- *   N8N_FALLBACK_TO_MOCK  "false" to surface n8n errors instead of falling back
  * ============================================================================
  */
 
 export const USE_LIVE_DATA = process.env.USE_LIVE_DATA === "true";
 
-/** When n8n is unreachable the dashboard stays usable on mock data unless disabled. */
-export const FALLBACK_TO_MOCK = process.env.N8N_FALLBACK_TO_MOCK !== "false";
+/** Outbound timeout. Also used to derive the dashboard's per-source deadline. */
+export const N8N_REQUEST_TIMEOUT_MS = Number(process.env.N8N_TIMEOUT_MS ?? 10_000);
 
 const N8N_BASE_URL = (process.env.N8N_BASE_URL ?? "").replace(/\/+$/, "");
 const N8N_WEBHOOK_PATH = (process.env.N8N_WEBHOOK_PATH ?? "webhook").replace(/^\/+|\/+$/g, "");
 const N8N_API_KEY = process.env.N8N_API_KEY ?? "";
-const REQUEST_TIMEOUT_MS = Number(process.env.N8N_TIMEOUT_MS ?? 10_000);
+const REQUEST_TIMEOUT_MS = N8N_REQUEST_TIMEOUT_MS;
 
 /**
  * Optional per-endpoint URL overrides, keyed by webhook path.
@@ -90,6 +89,16 @@ interface N8nRequestOptions {
   method?: "GET" | "POST";
   query?: Record<string, string | undefined>;
   body?: unknown;
+  /**
+   * Accept a `2xx` response with a zero-byte body as an empty object.
+   *
+   * The write webhooks are acknowledgements: the live `/incidents-resolve`
+   * responds `200` with **no** body at all (verified against the deployed
+   * workflow), and JSON-parsing that would report a successful resolve as a
+   * transport failure. Reads leave this off, so an unexpectedly empty read still
+   * surfaces as an error rather than silently looking like "no data".
+   */
+  allowEmptyBody?: boolean;
 }
 
 /** Transient-failure tolerance: one retry after a short backoff. */
@@ -128,7 +137,7 @@ export async function n8nFetch<T>(path: string, options: N8nRequestOptions = {})
 
 /** One HTTP round trip. */
 async function requestOnce<T>(path: string, options: N8nRequestOptions): Promise<T> {
-  const { method = "GET", query, body } = options;
+  const { method = "GET", query, body, allowEmptyBody = false } = options;
   const target = n8nWebhookUrl(path, query);
 
   if (!/^https?:\/\//i.test(target)) {
@@ -157,7 +166,19 @@ async function requestOnce<T>(path: string, options: N8nRequestOptions): Promise
       throw new N8nError(`n8n webhook "${path}" responded ${response.status}`, response.status);
     }
 
-    return (await response.json()) as T;
+    // Read as text first: `response.json()` on a zero-byte body throws a
+    // `SyntaxError`, which would be indistinguishable from a malformed payload.
+    const text = await response.text();
+    if (text.trim() === "") {
+      if (allowEmptyBody) return {} as T;
+      throw new N8nError(`n8n webhook "${path}" returned an empty body`);
+    }
+
+    try {
+      return JSON.parse(text) as T;
+    } catch {
+      throw new N8nError(`n8n webhook "${path}" returned a non-JSON body`);
+    }
   } catch (error) {
     if (error instanceof N8nError) throw error;
     if (error instanceof Error && error.name === "AbortError") {
@@ -170,11 +191,15 @@ async function requestOnce<T>(path: string, options: N8nRequestOptions): Promise
 }
 
 /**
- * Runs a live call and degrades to the mock dataset on failure.
- * `label` is logged server-side so a broken webhook is visible in the Vercel
- * function logs instead of failing silently.
+ * Resolves live data in live mode, and the bundled mock dataset otherwise.
+ *
+ * There is deliberately **no** mock fallback while `USE_LIVE_DATA` is true: a
+ * failed n8n call propagates (with the source label as context) so callers can
+ * report a degraded state. Silently substituting sample data made an outage look
+ * like a healthy dashboard, which is the worst possible failure mode for a
+ * monitoring tool.
  */
-export async function withFallback<T>(
+export async function liveOrMock<T>(
   label: string,
   live: () => Promise<T>,
   mock: () => T,
@@ -184,8 +209,6 @@ export async function withFallback<T>(
   try {
     return await live();
   } catch (error) {
-    if (!FALLBACK_TO_MOCK) throw error;
-    console.error(`[vwo-qa] ${label} fell back to mock data:`, (error as Error).message);
-    return mock();
+    throw new Error(`${label}: ${(error as Error).message}`);
   }
 }

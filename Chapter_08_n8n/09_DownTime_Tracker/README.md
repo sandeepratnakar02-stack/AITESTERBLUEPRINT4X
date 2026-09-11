@@ -143,13 +143,29 @@ N8N_WEBHOOK_PATH=webhook                    # "webhook-test" while editing in n8
 N8N_API_KEY=                                # optional x-api-key shared secret
 USE_LIVE_DATA=true                          # ⬅ go live
 NEXT_PUBLIC_N8N_UI_URL=https://your-n8n.example.com   # deep links only
+DASHBOARD_CONCURRENCY=3                     # optional, max parallel n8n calls
 ```
+
+There is no "fall back to mock" switch. Mock data is served **only** when `USE_LIVE_DATA` is not
+`true`; in live mode a failing upstream call becomes a visible warning/degraded section.
 
 ### Endpoints consumed by the app
 
-| Function in `lib/api.ts` | Endpoint | Source |
+Everything the browser calls is served from this app's own origin — n8n URLs and the API key never
+reach the client.
+
+| Browser request | Route handler | Aggregates |
 | --- | --- | --- |
-| `getServiceHealth()` / `getDashboardSummary()` | `GET /health-status` | `Health_Check_History` |
+| `GET /api/dashboard?environment=…` | `app/api/dashboard/route.ts` | all five read endpoints below, via `lib/dashboard.ts` |
+| `GET /api/incidents?environment=…` | `app/api/incidents/route.ts` | `GET /incidents` |
+| `POST /api/incidents/resolve` | `app/api/incidents/resolve/route.ts` | `POST /incidents-resolve` |
+
+The dashboard page makes **one** request (`/api/dashboard`) instead of five; the other pages use the
+same server-side helpers directly.
+
+| Function in `lib/api.ts` | n8n endpoint | Source |
+| --- | --- | --- |
+| `getHealthStatus()` | `GET /health-status` | `Health_Check_History` |
 | `getHealthChecks()` | `GET /health-checks` | `Health_Check_History` |
 | `getIncidents()` | `GET /incidents` | `Downtime_Incidents` |
 | `getIncidentById()` | `GET /incidents?id=…` | `Downtime_Incidents` |
@@ -170,8 +186,15 @@ actions go through `/api/health-check`, `/api/incidents/resolve` and `/api/setti
   dashboard's `HEALTHY / DOWN / SLOW / FUNCTIONAL_FAILURE`.
 - `retry-history` and the per-service latency threshold are **derived** — see
   *Field mapping notes* in `DEPLOYMENT.md`.
-- When a live call fails, the page falls back to mock data and logs
-  `[vwo-qa] … fell back to mock data`. Set `N8N_FALLBACK_TO_MOCK=false` to surface errors instead.
+- When `USE_LIVE_DATA=true` and a live call fails, the failure is surfaced: `/api/dashboard` returns
+  the sections it could load plus `sources[]` / `warnings[]` (rendered as an amber strip above the KPI
+  cards), and any hard failure on a dedicated page reaches `app/error.tsx`. Nothing is silently
+  replaced with sample data.
+- **Status codes.** `200` when at least one source responded (partial failures included), `503` when
+  every live source failed (`warnings.length === sources.length`) — the 503 body is the structured
+  `{ ok, warnings, snapshot }` envelope, so "backend down" is distinguishable from "nothing to
+  report". An environment with no monitored services reports `overallStatus: "UNKNOWN"` (never
+  `HEALTHY`) and the dashboard renders *No monitoring data*.
 
 ---
 
@@ -213,13 +236,12 @@ node scripts/stub-n8n-api.mjs      # terminal 1 → http://127.0.0.1:5999/webhoo
 
 USE_LIVE_DATA=true \
 N8N_BASE_URL=http://127.0.0.1:5999 \
-N8N_FALLBACK_TO_MOCK=false \
 npm run dev                        # terminal 2
 ```
 
-`N8N_FALLBACK_TO_MOCK=false` is important: it turns any contract mismatch into a visible error
-instead of silently serving mock data. The stub logs every request, so you can see exactly which
-endpoints the dashboard called.
+Because mock data is only ever used while `USE_LIVE_DATA` is off, any contract mismatch shows up as
+an error or a degraded section rather than being masked. The stub logs every request, so you can see
+exactly which endpoints the dashboard called.
 
 ### Response compatibility
 

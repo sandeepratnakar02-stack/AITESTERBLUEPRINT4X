@@ -105,9 +105,9 @@ Then add the environment variables in **Project → Settings → Environment Var
 | `N8N_BASE_URL` | `https://<your-instance>.app.n8n.cloud` |
 | `N8N_WEBHOOK_PATH` | `webhook` |
 | `N8N_API_KEY` | *(leave empty unless you add Header Auth to the Webhook nodes)* |
-| `N8N_TIMEOUT_MS` | `10000` |
+| `N8N_TIMEOUT_MS` | `30000` |
 | `USE_LIVE_DATA` | `true` |
-| `N8N_FALLBACK_TO_MOCK` | `true` |
+| `DASHBOARD_CONCURRENCY` | `3` *(optional — max parallel n8n calls)* |
 | `NEXT_PUBLIC_N8N_UI_URL` | `https://<your-instance>.app.n8n.cloud` |
 
 Apply them to **Production, Preview and Development**, then **redeploy** — `NEXT_PUBLIC_*` values are
@@ -186,11 +186,13 @@ N8N_BASE_URL=https://<your-instance>.app.n8n.cloud
 N8N_WEBHOOK_PATH=webhook
 N8N_API_KEY=
 USE_LIVE_DATA=true
-N8N_FALLBACK_TO_MOCK=true
+DASHBOARD_CONCURRENCY=3
 NEXT_PUBLIC_N8N_UI_URL=https://<your-instance>.app.n8n.cloud
 ```
 
-`USE_LIVE_DATA=false` (or unset) keeps the dashboard on mock data — useful for UI work.
+`USE_LIVE_DATA=false` (or unset) keeps the dashboard on mock data — useful for UI work. There is no
+fallback switch: mock data is used only while `USE_LIVE_DATA` is off, so a live-mode failure is
+always visible.
 
 ---
 
@@ -225,8 +227,8 @@ export const maxDuration = 60;
 ```
 
 Keep `maxDuration` **comfortably above `N8N_TIMEOUT_MS`**. That ordering is what lets the
-application's own timeout + mock fallback run and still render a page, instead of the platform
-killing the request mid-flight:
+application's own per-source deadlines fire and still return a partial-but-valid payload, instead of
+the platform killing the request mid-flight:
 
 | Setting | Value | Why |
 | --- | --- | --- |
@@ -236,10 +238,11 @@ killing the request mid-flight:
 If your plan caps the duration below 60 s, Vercel reports it at deploy time — lower **both**
 values together (e.g. `N8N_TIMEOUT_MS=20000` with `maxDuration=30`) rather than only one.
 
-**Reducing the need for it:** the latency comes from uncached fan-out on every render. Wrapping the
-`lib/api.ts` reads in `unstable_cache(..., { revalidate: 30 })` would make repeat loads instant and
-cut function cost, at the price of up-to-30-second-old data. Worth doing if the cold-start delay
-becomes annoying.
+**Reducing the need for it:** `GET /api/dashboard` fans out to five n8n webhooks, but concurrency is
+capped (`DASHBOARD_CONCURRENCY`, default 3) and every source has its own deadline, so one slow
+webhook no longer drags the whole render. Wrapping the `lib/api.ts` reads in
+`unstable_cache(..., { revalidate: 30 })` would make repeat loads instant and cut function cost, at
+the price of up-to-30-second-old data. Worth doing if the cold-start delay becomes annoying.
 
 ### n8n must be publicly reachable
 
@@ -263,8 +266,9 @@ becomes annoying.
 - **Scope the n8n credential.** The Google Sheets credential used by the API workflow only needs
   read access to the tracker workbook (plus write access on `Downtime_Incidents` and `Settings`
   for the resolve/settings endpoints).
-- **`N8N_FALLBACK_TO_MOCK=false` once proven.** Otherwise a broken integration looks like a
-  healthy (mock) dashboard. With it `false`, n8n failures surface as errors instead.
+- **Failures are never masked.** Mock data is only served while `USE_LIVE_DATA` is off. In live mode
+  a broken integration shows up as an amber "Partial data" strip (with per-source warnings), and a
+  hard failure on a dedicated page reaches `src/app/error.tsx`.
 - **n8n Cloud is public.** Anyone who learns a webhook path can read your health data, so the
   Header Auth step (§3.7) matters more on Cloud than on a private instance.
 
@@ -272,20 +276,35 @@ becomes annoying.
 
 ## 7. Operations
 
-- **Fallback visibility.** Every degraded call is logged server-side as
-  `[vwo-qa] <label> fell back to mock data: <reason>` — check Vercel → Deployments → Functions logs.
-- **Timeouts.** `N8N_TIMEOUT_MS` (default 10 s) bounds each outbound call so a hung n8n does not
+- **Partial-failure visibility.** `/api/dashboard` returns whatever sources succeeded plus a
+  `sources[]` array and a `warnings[]` array (`Cannot load <source>: <reason>`), rendered as an amber
+  strip above the KPI cards. Callers see `source: "live"` and an `ok: false` flag — no sample data is
+  substituted.
+- **Status codes.** `200` when at least one source responded (partial failure included); `503` when
+  **every** live source failed (`warnings.length === sources.length`), with the structured
+  `{ ok, warnings, snapshot }` body; `500` if the snapshot could not be assembled at all. Mock mode
+  (`USE_LIVE_DATA` off) always answers `200`.
+- **No-data summary.** An environment with nothing monitored reports `overallStatus: "UNKNOWN"`,
+  `servicesMonitored: 0` and `uptimePercent: 0`; the dashboard card reads *No monitoring data*
+  instead of a green all-clear.
+- **Bounded fan-out.** `DASHBOARD_CONCURRENCY` (default 3) caps how many n8n webhooks
+  `/api/dashboard` calls at once; each source also has its own deadline
+  (`N8N_TIMEOUT_MS + 5 s`) so one stalled webhook cannot hold the whole render.
+- **Timeouts.** `N8N_TIMEOUT_MS` (default 30 s) bounds each outbound call so a hung n8n does not
   hit the Vercel function limit.
 - **Auto refresh.** The top bar re-renders the current route once a minute while "Auto Refresh"
   is ON, so each open tab costs roughly one server render per minute.
 - **Mutations never fall back.** `POST /api/health-check`, `POST /api/incidents/resolve` and
-  `POST /api/settings` return `502` when n8n is unreachable, and the UI shows the reason.
+  `POST /api/settings` return `502` when n8n is unreachable, and the UI shows the reason. The write
+  webhooks acknowledge with `200` and an empty body (verified on the deployed `/incidents-resolve`),
+  which the transport accepts instead of reporting a successful resolve as a transport error.
 
 ### Troubleshooting
 
 | Symptom | Cause / fix |
 | --- | --- |
-| Dashboard shows mock data with `USE_LIVE_DATA=true` | Called failed — check the function logs for the fallback reason. |
+| Dashboard shows mock data with `USE_LIVE_DATA=true` | `USE_LIVE_DATA` is not exactly `true` in the deployed environment — redeploy after changing it. |
+| Amber "Partial data" strip | One or more of the five sources failed; the strip lists which, and the reason. |
 | `502` from `/api/health-check` | `N8N_BASE_URL` wrong, or the API workflow is not **active**. |
 | n8n returns `404` for every path | Wrong `N8N_WEBHOOK_PATH` (`webhook` vs `webhook-test`), or the workflow is inactive. |
 | `401` / `403` from n8n | Header Auth enabled on the Webhook node but `N8N_API_KEY` not set (or mismatched). |

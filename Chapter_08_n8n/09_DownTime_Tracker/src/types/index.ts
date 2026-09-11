@@ -164,6 +164,57 @@ export interface DashboardSummary {
   lastCheckedAt: string;
 }
 
+/**
+ * One upstream n8n source behind the aggregated dashboard snapshot.
+ *
+ * Recorded for every source the snapshot attempted, so callers can tell a
+ * partial failure (`some ok === false`) from a total one
+ * (`sources.every((s) => !s.ok)`, i.e. `warnings.length === sources.length`).
+ */
+export interface DashboardSource {
+  /** Matches the wording used in `warnings` (e.g. "incidents"). */
+  label: string;
+  ok: boolean;
+  error?: string | undefined;
+}
+
+/**
+ * Aggregated payload returned by `GET /api/dashboard` and used by the dashboard
+ * page. Enough to render the whole page from a single server-side pass.
+ */
+export interface DashboardSnapshot {
+  environment: Environment;
+  /** `live` when reading n8n, `mock` when `USE_LIVE_DATA` is not true. */
+  source: "live" | "mock";
+  /** False when at least one upstream source failed; see `warnings`. */
+  ok: boolean;
+  generatedAt: string;
+  /** Wall-clock time spent assembling the snapshot. */
+  durationMs: number;
+
+  overallStatus: HealthState;
+  servicesMonitored: number;
+  healthyServices: number;
+  failedServices: number;
+  activeIncidents: number;
+  averageResponseTimeMs: number;
+  uptimePercent: number;
+
+  services: Service[];
+  incidents: Incident[];
+  responseTimes: ResponseTimeMetric[];
+  retryHistory: RetryAttempt[];
+
+  /** Daily availability, for the uptime chart. */
+  uptime: UptimePoint[];
+  lastCheckedAt: string;
+
+  /** Every upstream source attempted, in fan-out order. */
+  sources: DashboardSource[];
+  /** Human-readable, one entry per upstream source that failed. */
+  warnings: string[];
+}
+
 export interface EnvironmentConfig {
   environment: Environment;
   baseUrl: string;

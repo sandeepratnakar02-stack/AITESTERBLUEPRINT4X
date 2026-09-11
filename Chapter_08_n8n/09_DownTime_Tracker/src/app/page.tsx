@@ -17,14 +17,9 @@ import { UptimeChart } from "@/components/dashboard/uptime-chart";
 import { IncidentTable } from "@/components/dashboard/incident-table";
 import { RetryTimeline } from "@/components/dashboard/retry-timeline";
 import { StatusClassification } from "@/components/dashboard/status-classification";
+import { DashboardWarnings } from "@/components/dashboard/dashboard-warnings";
 import { STATUS_META } from "@/components/dashboard/status-badge";
-import {
-  getDashboardSummary,
-  getIncidents,
-  getResponseTimeHistory,
-  getServiceHealth,
-  getUptimeHistory,
-} from "@/lib/api";
+import { getDashboardSnapshot } from "@/lib/dashboard";
 import { SLA_THRESHOLD_MS, UPTIME_TARGET_PCT } from "@/lib/constants";
 import { normalizeEnvironment } from "@/lib/environment";
 import { formatPercent, formatResponseTime } from "@/lib/format";
@@ -32,9 +27,9 @@ import { formatPercent, formatResponseTime } from "@/lib/format";
 export const metadata: Metadata = { title: "Dashboard" };
 
 /**
- * The dashboard is the heaviest route (5 parallel n8n calls). Declared here as
- * well as on the root layout so the budget does not depend on layout
- * propagation — a cold n8n Cloud instance measured ~13 s.
+ * The dashboard is the heaviest route. Declared here as well as on the root
+ * layout so the budget does not depend on layout propagation — a cold n8n Cloud
+ * instance measured ~13 s.
  */
 export const maxDuration = 60;
 
@@ -46,18 +41,22 @@ export default async function DashboardPage({ searchParams }: DashboardPageProps
   const { env } = await searchParams;
   const environment = normalizeEnvironment(env);
 
-  const [summary, services, incidents, responseTimes, uptime] = await Promise.all([
-    getDashboardSummary(environment),
-    getServiceHealth(environment),
-    getIncidents(environment),
-    getResponseTimeHistory(environment),
-    getUptimeHistory(environment),
-  ]);
+  // One aggregated source: `GET /api/dashboard` (same builder) resolves every
+  // upstream n8n call server-side with capped concurrency, so the page no longer
+  // fans out to five webhooks itself.
+  const snapshot = await getDashboardSnapshot(environment);
 
+  const { services, incidents, responseTimes, uptime } = snapshot;
   const activeIncident = incidents.find((incident) => incident.status === "Open") ?? incidents[0];
   // `overallStatus` comes from n8n, so never index STATUS_META without a fallback.
-  const overall = STATUS_META[summary.overallStatus] ?? STATUS_META.UNKNOWN;
-  const uptimeHealthy = summary.uptimePct >= UPTIME_TARGET_PCT;
+  const overall = STATUS_META[snapshot.overallStatus] ?? STATUS_META.UNKNOWN;
+  const uptimeHealthy = snapshot.uptimePercent >= UPTIME_TARGET_PCT;
+
+  /**
+   * An environment with no monitored services reports `HEALTHY` upstream, which
+   * would read as an all-clear. Show that there is nothing to report on instead.
+   */
+  const noMonitoringData = snapshot.servicesMonitored === 0;
 
   return (
     <div className="space-y-5">
@@ -66,53 +65,67 @@ export default async function DashboardPage({ searchParams }: DashboardPageProps
         description="Real-time availability and functional monitoring for VWO QA services."
       />
 
+      <DashboardWarnings snapshot={snapshot} />
+
       {/* Summary strip */}
       <section className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 2xl:grid-cols-7">
         <MetricCard
           label="Overall Status"
-          value={overall.label}
-          hint={`Availability vs ${UPTIME_TARGET_PCT}% SLA target`}
+          value={noMonitoringData ? "No monitoring data" : overall.label}
+          hint={
+            noMonitoringData
+              ? `No services are monitored in ${environment} yet`
+              : `Availability vs ${UPTIME_TARGET_PCT}% SLA target`
+          }
           icon={Activity}
-          accent={summary.overallStatus === "HEALTHY" ? "healthy" : summary.overallStatus === "DOWN" ? "down" : "degraded"}
+          accent={
+            noMonitoringData
+              ? "neutral"
+              : snapshot.overallStatus === "HEALTHY"
+                ? "healthy"
+                : snapshot.overallStatus === "DOWN"
+                  ? "down"
+                  : "degraded"
+          }
         />
         <MetricCard
           label="Services Monitored"
-          value={summary.servicesMonitored}
+          value={snapshot.servicesMonitored}
           hint="Across the selected environment"
           icon={Server}
           accent="info"
         />
         <MetricCard
           label="Healthy Services"
-          value={summary.healthyServices}
+          value={snapshot.healthyServices}
           hint="Passing HTTP + functional checks"
           icon={CheckCircle2}
           accent="healthy"
         />
         <MetricCard
           label="Failed Services"
-          value={summary.failedServices}
-          hint={summary.failedServices > 0 ? "Requires attention" : "No failures detected"}
+          value={snapshot.failedServices}
+          hint={snapshot.failedServices > 0 ? "Requires attention" : "No failures detected"}
           icon={XCircle}
-          accent={summary.failedServices > 0 ? "down" : "healthy"}
+          accent={snapshot.failedServices > 0 ? "down" : "healthy"}
         />
         <MetricCard
           label="Active Incidents"
-          value={summary.activeIncidents}
+          value={snapshot.activeIncidents}
           hint={activeIncident ? `Latest: ${activeIncident.id}` : "No open incidents"}
           icon={TriangleAlert}
-          accent={summary.activeIncidents > 0 ? "degraded" : "healthy"}
+          accent={snapshot.activeIncidents > 0 ? "degraded" : "healthy"}
         />
         <MetricCard
           label="Average Response Time"
-          value={formatResponseTime(summary.averageResponseTimeMs)}
+          value={formatResponseTime(snapshot.averageResponseTimeMs)}
           hint={`SLA threshold ${SLA_THRESHOLD_MS} ms`}
           icon={Timer}
           accent="info"
         />
         <MetricCard
           label="Uptime"
-          value={formatPercent(summary.uptimePct)}
+          value={formatPercent(snapshot.uptimePercent)}
           hint={`Target ${UPTIME_TARGET_PCT}%`}
           icon={TrendingUp}
           accent={uptimeHealthy ? "healthy" : "degraded"}

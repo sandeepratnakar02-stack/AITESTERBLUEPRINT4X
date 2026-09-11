@@ -26,13 +26,15 @@
  * spellings the hand-authored workflows in this chapter produce.
  *
  * With `USE_LIVE_DATA` unset the functions resolve the deterministic mock
- * dataset, so the dashboard runs standalone. When live calls fail they fall back
- * to mock data (unless `N8N_FALLBACK_TO_MOCK=false`) and log the reason.
+ * dataset, so the dashboard runs standalone. With `USE_LIVE_DATA=true` a failed
+ * live call rejects rather than quietly substituting sample data, so callers can
+ * surface an error or degraded section. `lib/dashboard.ts` aggregates these
+ * loaders into the single `/api/dashboard` payload the dashboard page consumes.
  * ============================================================================
  */
 
 import { cache } from "react";
-import { USE_LIVE_DATA, n8nFetch, withFallback } from "@/lib/n8n";
+import { USE_LIVE_DATA, n8nFetch, liveOrMock } from "@/lib/n8n";
 import {
   normalizeHealthCheck,
   normalizeIncident,
@@ -84,9 +86,9 @@ const byNewest = (a: string, b: string) => b.localeCompare(a);
  * `GET /health-status` — memoised per render pass so the dashboard can derive
  * both the service list and the summary from a single n8n round trip.
  */
-const fetchHealthStatus = cache(
+export const getHealthStatus = cache(
   async (environment: Environment): Promise<{ summary: DashboardSummary; services: Service[] }> =>
-    withFallback(
+    liveOrMock(
       "health-status",
       async () => {
         const payload = await n8nFetch<unknown>("/health-status", { query: { environment } });
@@ -107,42 +109,14 @@ const fetchHealthStatus = cache(
 
 /** Latest result for every monitored service. */
 export async function getServiceHealth(environment: Environment = "QA"): Promise<Service[]> {
-  return (await fetchHealthStatus(environment)).services;
-}
-
-/** Aggregated KPIs for the summary cards. */
-export async function getDashboardSummary(
-  environment: Environment = "QA",
-): Promise<DashboardSummary> {
-  const { summary, services } = await fetchHealthStatus(environment);
-
-  if (!USE_LIVE_DATA) return summary;
-
-  // `/health-status` cannot know about open incidents (they live in another
-  // sheet) and its `uptimePct` is derived from a single check window, so both
-  // fields are taken from the authoritative endpoints instead.
-  const [incidents, uptime] = await Promise.all([
-    getIncidents(environment).catch(() => []),
-    getUptimeHistory(environment).catch(() => []),
-  ]);
-
-  const latestUptime = uptime.length > 0 ? uptime[uptime.length - 1].uptimePct : 0;
-
-  return {
-    ...summary,
-    servicesMonitored: summary.servicesMonitored || services.length,
-    activeIncidents: incidents.filter(
-      (incident) => incident.status === "Open" || incident.status === "Investigating",
-    ).length,
-    uptimePct: latestUptime > 0 ? latestUptime : summary.uptimePct,
-  };
+  return (await getHealthStatus(environment)).services;
 }
 
 export async function getServiceById(
   serviceId: string,
   environment: Environment = "QA",
 ): Promise<Service | undefined> {
-  return withFallback(
+  return liveOrMock(
     "service-by-id",
     async () => (await getServiceHealth(environment)).find((service) => service.id === serviceId),
     () => getMockServiceById(serviceId, environment),
@@ -155,7 +129,7 @@ export async function getServiceById(
 
 /** `GET /health-checks` — raw check-level history. */
 export async function getHealthChecks(environment: Environment = "QA"): Promise<HealthCheck[]> {
-  return withFallback(
+  return liveOrMock(
     "health-checks",
     async () => {
       const payload = await n8nFetch<unknown>("/health-checks", { query: { environment } });
@@ -171,7 +145,7 @@ export async function getHealthChecks(environment: Environment = "QA"): Promise<
 export async function getResponseTimeHistory(
   environment: Environment = "QA",
 ): Promise<ResponseTimeMetric[]> {
-  return withFallback(
+  return liveOrMock(
     "response-times",
     async () => {
       const payload = await n8nFetch<unknown>("/response-times", {
@@ -185,27 +159,33 @@ export async function getResponseTimeHistory(
   );
 }
 
-/** `GET /uptime` — daily availability for the uptime chart. */
-export async function getUptimeHistory(environment: Environment = "QA"): Promise<UptimePoint[]> {
-  return withFallback(
-    "uptime",
-    async () => {
-      const payload = await n8nFetch<unknown>("/uptime", {
-        query: { environment, days: "7" },
-      });
-      return toArray<unknown>(payload, "uptime", "points")
-        .map(normalizeUptimePoint)
-        .filter((point) => point.date !== "")
-        .sort((a, b) => a.date.localeCompare(b.date))
-        .slice(-14);
-    },
-    () => getMockUptime(environment),
-  );
-}
+/**
+ * `GET /uptime` — daily availability for the uptime chart.
+ *
+ * Memoised per render: the dashboard previously fetched this twice because both
+ * the summary and the page requested it independently.
+ */
+export const getUptimeHistory = cache(
+  async (environment: Environment = "QA"): Promise<UptimePoint[]> =>
+    liveOrMock(
+      "uptime",
+      async () => {
+        const payload = await n8nFetch<unknown>("/uptime", {
+          query: { environment, days: "7" },
+        });
+        return toArray<unknown>(payload, "uptime", "points")
+          .map(normalizeUptimePoint)
+          .filter((point) => point.date !== "")
+          .sort((a, b) => a.date.localeCompare(b.date))
+          .slice(-14);
+      },
+      () => getMockUptime(environment),
+    ),
+);
 
 /** `GET /retry-history` — retry attempts derived from the incident record. */
 export async function getRetryHistory(environment: Environment = "QA"): Promise<RetryAttempt[]> {
-  return withFallback(
+  return liveOrMock(
     "retry-history",
     async () => {
       const payload = await n8nFetch<unknown>("/retry-history", { query: { environment } });
@@ -219,7 +199,7 @@ export async function getRetryHistory(environment: Environment = "QA"): Promise<
 
 /** `GET /logs` — flat, filterable log stream. */
 export async function getLogs(environment: Environment = "QA"): Promise<LogEntry[]> {
-  return withFallback(
+  return liveOrMock(
     "logs",
     async () => {
       const payload = await n8nFetch<unknown>("/logs", { query: { environment } });
@@ -236,7 +216,7 @@ export async function getLogs(environment: Environment = "QA"): Promise<LogEntry
 /* -------------------------------------------------------------------------- */
 
 const fetchIncidents = cache(async (environment: Environment): Promise<Incident[]> =>
-  withFallback(
+  liveOrMock(
     "incidents",
     async () => {
       const payload = await n8nFetch<unknown>("/incidents", { query: { environment } });
@@ -255,7 +235,7 @@ export async function getIncidents(environment: Environment = "QA"): Promise<Inc
 
 /** `GET /incidents?id=...` — single incident incl. timeline + n8n execution id. */
 export async function getIncidentById(incidentId: string): Promise<Incident | undefined> {
-  return withFallback(
+  return liveOrMock(
     "incident-by-id",
     async () => {
       const payload = await n8nFetch<unknown>("/incidents", { query: { id: incidentId } });
@@ -288,6 +268,7 @@ export async function runHealthCheck(environment: Environment = "QA"): Promise<{
     const payload = await n8nFetch<Record<string, unknown>>("/health-check", {
       method: "POST",
       body: { environment, application: "VWO" },
+      allowEmptyBody: true,
     });
 
     return {
@@ -311,9 +292,12 @@ export async function runHealthCheck(environment: Environment = "QA"): Promise<{
 /** `POST /incidents-resolve` — mark an incident resolved from the detail page. */
 export async function resolveIncident(incidentId: string): Promise<{ ok: boolean }> {
   if (USE_LIVE_DATA) {
+    // The live webhook acknowledges with `200` and an empty body, so an empty
+    // payload means "the workflow ran", not "the response was malformed".
     const payload = await n8nFetch<Record<string, unknown>>("/incidents-resolve", {
       method: "POST",
       body: { incidentId },
+      allowEmptyBody: true,
     });
     return { ok: payload?.success !== false && payload?.ok !== false };
   }
@@ -327,7 +311,7 @@ export async function resolveIncident(incidentId: string): Promise<{ ok: boolean
 
 /** `GET /settings` — thresholds, retry policy and environment configuration. */
 export async function getSettings(): Promise<DashboardSettings> {
-  return withFallback(
+  return liveOrMock(
     "settings",
     async () => normalizeSettings(await n8nFetch<unknown>("/settings")),
     () => getMockSettings(),
@@ -341,6 +325,7 @@ export async function updateSettings(payload: DashboardSettings): Promise<Dashbo
     // send both spellings — each producer picks up what it understands.
     await n8nFetch<unknown>("/settings-write", {
       method: "POST",
+      allowEmptyBody: true,
       body: {
         ...payload,
         environment: payload.environments.find((entry) => entry.enabled)?.environment ?? "QA",

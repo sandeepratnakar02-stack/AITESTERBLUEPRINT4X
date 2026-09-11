@@ -12,7 +12,7 @@
  * Use it to verify the dashboard before or without a live n8n instance:
  *
  *   node scripts/stub-n8n-api.mjs --patched
- *   USE_LIVE_DATA=true N8N_BASE_URL=http://127.0.0.1:5999 N8N_FALLBACK_TO_MOCK=false npm run dev
+ *   USE_LIVE_DATA=true N8N_BASE_URL=http://127.0.0.1:5999 npm run dev
  *
  * Every endpoint logs the request so you can see what the dashboard asks for.
  */
