@@ -1,0 +1,897 @@
+{
+  "name": "09_DownTime_Tracker",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "minutes",
+              "minutesInterval": 5
+            }
+          ]
+        }
+      },
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        0,
+        0
+      ],
+      "id": "sched1-f2c901d0-c95c-49a8-a",
+      "name": "01 - Start Scheduled Monitoring"
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "language": "javaScript",
+        "jsCode": "// ===== VWO FUNCTIONAL DOWNTIME TRACKER - CENTRAL CONFIGURATION =====\n// Everything is maintained here (spec: keep all endpoints & settings configurable\n// in ONE place). Never store secrets here - reference them via n8n credentials.\nconst MONITOR = {\n  application: 'VWO',\n  environment: 'QA',                       // QA | STAGING | PRODUCTION\n  timezone: 'Asia/Kolkata',\n  scheduleMinutes: 5,                      // default monitoring frequency\n  retryMaxAttempts: 3,                     // 1 initial + 2 retries\n  retryDelaysMs: [20000, 30000],           // wait before attempt 2 and attempt 3\n  degradedThreshold: 3,                    // consecutive slow checks before PERFORMANCE_DEGRADATION\n  requestTimeoutMs: 10000,\n  detectedBy: 'VWO Functional Downtime Tracker',\n  // ---- Google Sheets (spec: VWO_QA_Downtime_Tracker workbook) ----\n  spreadsheetId: 'REPLACE_WITH_SPREADSHEET_ID',\n  sheetIncidents: 'Downtime_Incidents',\n  sheetHistory: 'Health_Check_History',\n  sheetDaily: 'Daily_Availability',\n  // ---- Alerts (no hardcoded webhooks; channel id + n8n credential) ----\n  slackChannelId: 'REPLACE_WITH_SLACK_CHANNEL_ID',\n  // ---- Groq AI incident summary ----\n  groqModel: 'qwen/qwen3.8-27b',\n  groqEndpoint: 'https://api.groq.com/openai/v1/chat/completions',\n  groqEnabled: true,\n};\n// checkType: HTTP | API | FUNCTIONAL\n// expectedJsonValue '__nonempty__' => field must be present & non-empty\nconst SERVICES = [\n  { application: 'VWO', environment: 'QA', serviceName: 'VWO Main Application', checkType: 'HTTP',        url: 'https://app.vwo.com/',                        method: 'GET', expectedStatus: 200, expectedText: '',                              responseTimeThresholdMs: 3000, critical: true },\n  { application: 'VWO', environment: 'QA', serviceName: 'VWO Login',             checkType: 'FUNCTIONAL', url: 'https://app.vwo.com/login',                  method: 'GET', expectedStatus: 200, expectedText: 'Sign in',                       responseTimeThresholdMs: 3000, critical: true },\n  { application: 'VWO', environment: 'QA', serviceName: 'VWO Dashboard API',     checkType: 'API',        url: 'REPLACE_WITH_VWO_DASHBOARD_API_URL',         method: 'GET', expectedStatus: 200, expectedJsonField: 'success', expectedJsonValue: true,              responseTimeThresholdMs: 2500, critical: true },\n  { application: 'VWO', environment: 'QA', serviceName: 'Campaign Service',      checkType: 'API',        url: 'REPLACE_WITH_VWO_CAMPAIGN_API_URL',          method: 'GET', expectedStatus: 200, expectedJsonField: 'data',    expectedJsonValue: '__nonempty__', responseTimeThresholdMs: 2500, critical: true },\n  { application: 'VWO', environment: 'QA', serviceName: 'Editor Service',        checkType: 'API',        url: 'REPLACE_WITH_VWO_EDITOR_API_URL',            method: 'GET', expectedStatus: 200, expectedJsonField: 'status',  expectedJsonValue: 'healthy',        responseTimeThresholdMs: 3000, critical: true },\n];\n// Optionally attach per-service auth headers (values must come from env/credentials,\n// never hardcode secrets). Example: { headerName: 'Authorization', headerValue: 'Bearer ' + token }\n// and pass token in from an n8n expression/env when this Code node supports it.\nconst out = SERVICES.map(function (s) {\n  const clone = JSON.parse(JSON.stringify(s));\n  clone._monitor = MONITOR;\n  return clone;\n});\nreturn out;"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        280,
+        0
+      ],
+      "id": "cfg2-79552057-1211-41a8-9",
+      "name": "02 - Load VWO Service Configuration"
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "language": "javaScript",
+        "jsCode": "const items = $input.all();\nconst out = [];\nfunction pad2(n) { n = Number(n); return (n < 10 ? '0' : '') + n; }\nfunction toIST(d) { const t = new Date(d.getTime() + 5.5 * 3600000); return t.getUTCFullYear() + '-' + pad2(t.getUTCMonth() + 1) + '-' + pad2(t.getUTCDate()) + ' ' + pad2(t.getUTCHours()) + ':' + pad2(t.getUTCMinutes()) + ':' + pad2(t.getUTCSeconds()); }\nfor (const it of items) {\n  const j = it.json || {};\n  const serviceName = String(j.serviceName || 'Unknown Service');\n  const env = String(j.environment || 'QA');\n  // serviceKey example: QA::VWO_LOGIN  (spec)\n  const serviceKey = env + '::' + serviceName.toUpperCase().replace(/[^A-Z0-9]+/g, '_');\n  const now = new Date();\n  out.push({ json: Object.assign({}, j, {\n    serviceKey: serviceKey,\n    checkType: String(j.checkType || 'HTTP').toUpperCase(),\n    method: String(j.method || 'GET').toUpperCase(),\n    expectedStatus: Number(j.expectedStatus || 200),\n    expectedText: j.expectedText || '',\n    expectedJsonField: j.expectedJsonField || '',\n    expectedJsonValue: (j.expectedJsonValue === undefined || j.expectedJsonValue === null) ? '' : j.expectedJsonValue,\n    responseTimeThresholdMs: Number(j.responseTimeThresholdMs || 3000),\n    critical: j.critical === true,\n    requestTimeoutMs: Number((j._monitor && j._monitor.requestTimeoutMs) || 10000),\n    retryMaxAttempts: Number((j._monitor && j._monitor.retryMaxAttempts) || 3),\n    degradedThreshold: Number((j._monitor && j._monitor.degradedThreshold) || 3),\n    retryDelaysMs: (j._monitor && j._monitor.retryDelaysMs) || [20000, 30000],\n    timestamp: now.toISOString(),\n    timestampIST: toIST(now),\n    runId: 'RUN-' + now.getTime()\n  })});\n}\nreturn out;"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        560,
+        0
+      ],
+      "id": "loop3-7f8df4fc-ca07-4518-b",
+      "name": "03 - Loop Through Services"
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "language": "javaScript",
+        "jsCode": "const items = $input.all();\nconst out = [];\nfor (const it of items) {\n  const j = it.json || {};\n  // optional per-service headers (populate safely via credentials/env, never inline secrets)\n  const requestHeaders = {};\n  if (j.auth && j.auth.headerName && j.auth.headerValue) { requestHeaders[j.auth.headerName] = j.auth.headerValue; }\n  out.push({ json: Object.assign({}, j, {\n    requestHeaders: requestHeaders,\n    attemptCount: 1,\n    retryCount: 0,\n    httpOk: false,\n    functionalOk: null,\n    healthStatus: 'UNKNOWN'\n  })});\n}\nreturn out;"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        840,
+        0
+      ],
+      "id": "prep4-c20efd9c-31aa-41c2-8",
+      "name": "04 - Prepare Health Check"
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "language": "javaScript",
+        "jsCode": "// Per-service HTTP check (attempt 1). n8n wraps Code-node bodies in an async\n// function so top-level await + this.helpers.httpRequest are available.\nconst items = $input.all();\nconst out = [];\nlet httpFn = null;\ntry {\n  if (typeof helpers !== 'undefined' && helpers && helpers.httpRequest) { httpFn = helpers.httpRequest.bind(helpers); }\n  else if (this && this.helpers && this.helpers.httpRequest) { httpFn = this.helpers.httpRequest.bind(this.helpers); }\n} catch (e) { httpFn = null; }\nfor (const it of items) {\n  const j = it.json || {};\n  const started = Date.now();\n  let statusCode = null;\n  let bodyText = '';\n  let errorText = null;\n  let timedOut = false;\n  if (httpFn) {\n    const opts = { method: j.method, url: j.url, timeout: Number(j.requestTimeoutMs || 10000) };\n    const hdrs = j.requestHeaders || {};\n    if (Object.keys(hdrs).length > 0) { opts.headers = hdrs; }\n    try {\n      const resp = await httpFn(opts);\n      if (resp && typeof resp === 'object' && 'statusCode' in resp) {\n        statusCode = resp.statusCode;\n        bodyText = JSON.stringify(resp.body !== undefined ? resp.body : resp);\n      } else if (typeof resp === 'string') { bodyText = resp; statusCode = 200; }\n      else if (resp !== null && resp !== undefined) { bodyText = JSON.stringify(resp); statusCode = 200; }\n      else { statusCode = 200; }\n    } catch (err) {\n      errorText = String((err && err.message) || err || 'HTTP request failed');\n      const codeMatch = (errorText || '').match(/[1-5][0-9][0-9]/);\n      if (codeMatch) { statusCode = Number(codeMatch[0]); }\n      const low = errorText.toLowerCase();\n      if (low.indexOf('timeout') > -1 || low.indexOf('timed out') > -1 || low.indexOf('etimedout') > -1) { timedOut = true; }\n    }\n  } else {\n    errorText = 'HTTP helper not available in this Code node - use a native HTTP Request node for the check';\n  }\n  const responseTimeMs = Date.now() - started;\n  out.push({ json: Object.assign({}, j, {\n    httpStatus: statusCode,\n    rawBody: (bodyText || '').slice(0, 6000),\n    httpError: errorText,\n    timedOut: timedOut,\n    responseTimeMs: responseTimeMs,\n    timingSource: 'client-measured',\n    attemptCount: Number(j.attemptCount || 1),\n    retryCount: Number(j.retryCount || 0)\n  })});\n}\nreturn out;"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1120,
+        0
+      ],
+      "id": "a15-c16d3eea-c2a8-4c37-a",
+      "name": "05 - Execute Health Check (Attempt 1)"
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "language": "javaScript",
+        "jsCode": "const items = $input.all();\nconst out = [];\nfor (const it of items) {\n  const j = it.json || {};\n  const rt = Number(j.responseTimeMs || 0);\n  const threshold = Number(j.responseTimeThresholdMs || 3000);\n  out.push({ json: Object.assign({}, j, {\n    responseTimeMs: rt,\n    exceedsThreshold: rt > threshold\n  })});\n}\nreturn out;"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1400,
+        0
+      ],
+      "id": "rt6-be608e70-6c9c-4024-8",
+      "name": "06 - Calculate Response Time"
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "language": "javaScript",
+        "jsCode": "const items = $input.all();\nconst out = [];\nfor (const it of items) {\n  const j = it.json || {};\n  let httpOk = true;\n  let cat = '';\n  let reason = '';\n  const effectiveStatus = j.httpStatus === null || j.httpStatus === undefined ? null : Number(j.httpStatus);\n  if (j.httpError) {\n    httpOk = false;\n    const err = String(j.httpError);\n    const low = err.toLowerCase();\n    if (j.timedOut || low.indexOf('timeout') > -1) { cat = 'TIMEOUT'; reason = 'Request timed out: ' + err; }\n    else if (low.indexOf('enotfound') > -1 || low.indexOf('getaddrinfo') > -1 || low.indexOf('dns') > -1) { cat = 'DNS'; reason = 'DNS resolution failed: ' + err; }\n    else if (low.indexOf('econnrefused') > -1 || low.indexOf('connection refused') > -1) { cat = 'NETWORK'; reason = 'Connection refused: ' + err; }\n    else if (low.indexOf('certificate') > -1 || low.indexOf('ssl') > -1 || low.indexOf('tls') > -1) { cat = 'SSL'; reason = 'SSL/TLS error: ' + err; }\n    else if (effectiveStatus !== null && effectiveStatus >= 500) { cat = 'HTTP_5XX'; reason = err; }\n    else if (effectiveStatus !== null && effectiveStatus >= 400) { cat = 'HTTP_4XX'; reason = err; }\n    else { cat = 'NETWORK'; reason = err; }\n  } else if (effectiveStatus === null) {\n    httpOk = false; cat = 'UNKNOWN'; reason = 'No HTTP response captured';\n  } else if (effectiveStatus !== Number(j.expectedStatus)) {\n    httpOk = false;\n    if (effectiveStatus >= 500) { cat = 'HTTP_5XX'; reason = 'Expected HTTP ' + j.expectedStatus + ' but received ' + effectiveStatus; }\n    else if (effectiveStatus >= 400) { cat = 'HTTP_4XX'; reason = 'Expected HTTP ' + j.expectedStatus + ' but received ' + effectiveStatus; }\n    else { cat = 'HTTP_UNEXPECTED'; reason = 'Expected HTTP ' + j.expectedStatus + ' but received ' + effectiveStatus; }\n  }\n  out.push({ json: Object.assign({}, j, {\n    httpOk: httpOk,\n    httpStatus: effectiveStatus,\n    failureCategory: cat,\n    failureReason: reason\n  })});\n}\nreturn out;"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1680,
+        0
+      ],
+      "id": "tech7-4fab56c4-7d76-413f-8",
+      "name": "07 - Validate Technical Response"
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "language": "javaScript",
+        "jsCode": "const items = $input.all();\nconst out = [];\nfor (const it of items) {\n  const j = it.json || {};\n  const type = String(j.checkType || 'HTTP').toUpperCase();\n  const body = String(j.rawBody || '');\n  let functionalOk = true;\n  let validationResult = 'PASS';\n  let actualValue = '';\n  let expectedValueStr = '';\n  if (j.httpOk === true) {\n    if (type === 'API') {\n      let parsed = null;\n      let jsonText = body;\n      const start = body.indexOf('{');\n      const end = body.lastIndexOf('}');\n      if (start > -1 && end > start) { jsonText = body.slice(start, end + 1); }\n      try { parsed = JSON.parse(jsonText); } catch (e) { parsed = null; }\n      if (parsed === null || typeof parsed !== 'object') {\n        functionalOk = false; validationResult = 'FAIL'; actualValue = body.slice(0, 200);\n      } else {\n        const field = j.expectedJsonField || '';\n        let val = null;\n        if (field) {\n          val = parsed;\n          const parts = String(field).split('.');\n          for (const p of parts) { if (val !== null && val !== undefined) { val = val[p]; } else break; }\n        }\n        const want = j.expectedJsonValue;\n        expectedValueStr = want === '__nonempty__' ? '<non-empty>' : String(want);\n        actualValue = (val === null || val === undefined) ? '(missing)' : String(val);\n        if (field) {\n          if (want === '__nonempty__') {\n            const empty = val === null || val === undefined || val === '' || (Array.isArray(val) && val.length === 0) || (typeof val === 'object' && Object.keys(val).length === 0);\n            if (empty) { functionalOk = false; validationResult = 'FAIL'; }\n          } else if (typeof want === 'boolean') {\n            if (val !== want) { functionalOk = false; validationResult = 'FAIL'; }\n          } else {\n            if (String(val) !== String(want)) { functionalOk = false; validationResult = 'FAIL'; }\n          }\n        }\n        if (functionalOk && j.expectedText && body.indexOf(String(j.expectedText)) === -1) { functionalOk = false; validationResult = 'FAIL'; expectedValueStr = String(j.expectedText); actualValue = body.slice(0, 200); }\n      }\n    } else if (type === 'FUNCTIONAL' || (type === 'HTTP' && j.expectedText)) {\n      expectedValueStr = String(j.expectedText || '');\n      if (j.expectedText) {\n        if (body.indexOf(String(j.expectedText)) === -1) { functionalOk = false; validationResult = 'FAIL'; actualValue = body.slice(0, 200); }\n      }\n    } else {\n      validationResult = 'N/A';\n    }\n  } else {\n    validationResult = 'N/A';\n  }\n  out.push({ json: Object.assign({}, j, {\n    functionalOk: functionalOk,\n    validationResult: validationResult,\n    actualValue: actualValue,\n    expectedValueStr: expectedValueStr\n  })});\n}\nreturn out;"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1960,
+        0
+      ],
+      "id": "func8-f6c87c25-5d5a-40a8-a",
+      "name": "08 - Validate Functional Response"
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "language": "javaScript",
+        "jsCode": "const items = $input.all();\nconst out = [];\nfor (const it of items) {\n  const j = it.json || {};\n  const threshold = Number(j.responseTimeThresholdMs || 3000);\n  const rt = Number(j.responseTimeMs || 0);\n  let status;\n  if (j.httpOk !== true) { status = 'DOWN'; }\n  else if (j.functionalOk === false) { status = 'FUNCTIONAL_FAILURE'; }\n  else if (rt > threshold) { status = 'DEGRADED'; }\n  else { status = 'UP'; }\n  let cat = j.failureCategory || '';\n  let reason = j.failureReason || '';\n  if (status === 'FUNCTIONAL_FAILURE' && !cat) { cat = 'FUNCTIONAL_FAILURE'; reason = 'Functional validation failed'; }\n  if (status === 'DEGRADED') { cat = 'PERFORMANCE_DEGRADATION'; reason = 'Response time ' + rt + ' ms exceeded threshold ' + threshold + ' ms'; }\n  if (status === 'DOWN' && !cat) { cat = 'UNKNOWN'; reason = 'Health check failed'; }\n  out.push({ json: Object.assign({}, j, {\n    healthStatus: status,\n    isDown: status === 'DOWN',\n    isFunctionalFailure: status === 'FUNCTIONAL_FAILURE',\n    isDegraded: status === 'DEGRADED',\n    failureCategory: cat,\n    failureReason: reason,\n    needsRetry: status === 'DOWN' || status === 'FUNCTIONAL_FAILURE'\n  })});\n}\nreturn out;"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2240,
+        0
+      ],
+      "id": "clf9-1f0324c1-ce80-4707-8",
+      "name": "09 - Classify Service Health"
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "language": "javaScript",
+        "jsCode": "// Only DOWN / FUNCTIONAL_FAILURE items are retried here (max 3 attempts, 20s + 30s waits).\nconst items = $input.all();\nconst out = [];\nlet httpFn = null;\ntry {\n  if (typeof helpers !== 'undefined' && helpers && helpers.httpRequest) { httpFn = helpers.httpRequest.bind(helpers); }\n  else if (this && this.helpers && this.helpers.httpRequest) { httpFn = this.helpers.httpRequest.bind(this.helpers); }\n} catch (e) { httpFn = null; }\nconst sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));\nasync function attempt(j) {\n  const started = Date.now();\n  let statusCode = null; let bodyText = ''; let errorText = null; let timedOut = false;\n  if (httpFn) {\n    const opts = { method: j.method, url: j.url, timeout: Number(j.requestTimeoutMs || 10000) };\n    const hdrs = j.requestHeaders || {};\n    if (Object.keys(hdrs).length > 0) { opts.headers = hdrs; }\n    try {\n      const resp = await httpFn(opts);\n      if (resp && typeof resp === 'object' && 'statusCode' in resp) { statusCode = resp.statusCode; bodyText = JSON.stringify(resp.body !== undefined ? resp.body : resp); }\n      else if (typeof resp === 'string') { bodyText = resp; statusCode = 200; }\n      else if (resp !== null && resp !== undefined) { bodyText = JSON.stringify(resp); statusCode = 200; }\n      else { statusCode = 200; }\n    } catch (err) {\n      errorText = String((err && err.message) || err || 'HTTP request failed');\n      const codeMatch = (errorText || '').match(/[1-5][0-9][0-9]/);\n      if (codeMatch) { statusCode = Number(codeMatch[0]); }\n      const low = errorText.toLowerCase();\n      if (low.indexOf('timeout') > -1 || low.indexOf('timed out') > -1) { timedOut = true; }\n    }\n  } else {\n    errorText = 'HTTP helper not available - use a native HTTP Request node';\n  }\n  return { httpStatus: statusCode, rawBody: (bodyText || '').slice(0, 6000), httpError: errorText, timedOut: timedOut, responseTimeMs: Date.now() - started };\n}\n// Compact re-validation (mirrors nodes 07-09)\nfunction evaluate(j) {\n  let httpOk = true; let cat = ''; let reason = ''; const effectiveStatus = j.httpStatus === null || j.httpStatus === undefined ? null : Number(j.httpStatus);\n  if (j.httpError) {\n    httpOk = false;\n    const err = String(j.httpError); const low = err.toLowerCase();\n    if (j.timedOut || low.indexOf('timeout') > -1) { cat = 'TIMEOUT'; reason = 'Request timed out: ' + err; }\n    else if (low.indexOf('enotfound') > -1 || low.indexOf('getaddrinfo') > -1) { cat = 'DNS'; reason = 'DNS resolution failed: ' + err; }\n    else if (low.indexOf('econnrefused') > -1 || low.indexOf('connection refused') > -1) { cat = 'NETWORK'; reason = 'Connection refused: ' + err; }\n    else if (low.indexOf('certificate') > -1 || low.indexOf('ssl') > -1) { cat = 'SSL'; reason = 'SSL/TLS error: ' + err; }\n    else if (effectiveStatus !== null && effectiveStatus >= 500) { cat = 'HTTP_5XX'; reason = err; }\n    else if (effectiveStatus !== null && effectiveStatus >= 400) { cat = 'HTTP_4XX'; reason = err; }\n    else { cat = 'NETWORK'; reason = err; }\n  } else if (effectiveStatus === null) { httpOk = false; cat = 'UNKNOWN'; reason = 'No HTTP response captured'; }\n  else if (effectiveStatus !== Number(j.expectedStatus)) {\n    httpOk = false;\n    if (effectiveStatus >= 500) { cat = 'HTTP_5XX'; reason = 'Expected HTTP ' + j.expectedStatus + ' but received ' + effectiveStatus; }\n    else if (effectiveStatus >= 400) { cat = 'HTTP_4XX'; reason = 'Expected HTTP ' + j.expectedStatus + ' but received ' + effectiveStatus; }\n    else { cat = 'HTTP_UNEXPECTED'; reason = 'Expected HTTP ' + j.expectedStatus + ' but received ' + effectiveStatus; }\n  }\n  const type = String(j.checkType || 'HTTP').toUpperCase();\n  const body = String(j.rawBody || '');\n  let functionalOk = true;\n  if (httpOk) {\n    if (type === 'API') {\n      let parsed = null; let jsonText = body;\n      const s = body.indexOf('{'); const e = body.lastIndexOf('}');\n      if (s > -1 && e > s) { jsonText = body.slice(s, e + 1); }\n      try { parsed = JSON.parse(jsonText); } catch (e2) { parsed = null; }\n      if (parsed === null || typeof parsed !== 'object') { functionalOk = false; }\n      else {\n        const field = j.expectedJsonField || '';\n        let val = null;\n        if (field) { val = parsed; const parts = String(field).split('.'); for (const p of parts) { if (val !== null && val !== undefined) { val = val[p]; } else break; } }\n        const want = j.expectedJsonValue;\n        if (field) {\n          if (want === '__nonempty__') { const empty = val === null || val === undefined || val === '' || (Array.isArray(val) && val.length === 0) || (typeof val === 'object' && Object.keys(val).length === 0); if (empty) { functionalOk = false; } }\n          else if (typeof want === 'boolean') { if (val !== want) { functionalOk = false; } }\n          else { if (String(val) !== String(want)) { functionalOk = false; } }\n        }\n      }\n    } else if (j.expectedText) { if (body.indexOf(String(j.expectedText)) === -1) { functionalOk = false; } }\n  }\n  const rt = Number(j.responseTimeMs || 0);\n  const threshold = Number(j.responseTimeThresholdMs || 3000);\n  let status;\n  if (!httpOk) { status = 'DOWN'; }\n  else if (!functionalOk) { status = 'FUNCTIONAL_FAILURE'; }\n  else if (rt > threshold) { status = 'DEGRADED'; }\n  else { status = 'UP'; }\n  if (!cat && status === 'FUNCTIONAL_FAILURE') { cat = 'FUNCTIONAL_FAILURE'; reason = 'Functional validation failed on retry'; }\n  if (status === 'DEGRADED') { cat = 'PERFORMANCE_DEGRADATION'; reason = 'Response time ' + rt + ' ms exceeded ' + threshold + ' ms'; }\n  if (status === 'DOWN' && !cat) { cat = 'UNKNOWN'; reason = 'Health check failed'; }\n  return { httpOk: httpOk, functionalOk: functionalOk, healthStatus: status, failureCategory: cat, failureReason: reason };\n}\nfor (const it of items) {\n  const j = it.json || {};\n  let cur = j;\n  if (cur.healthStatus === 'DOWN' || cur.healthStatus === 'FUNCTIONAL_FAILURE') {\n    const maxAttempts = Number(cur.retryMaxAttempts || 3);\n    const delays = cur.retryDelaysMs || [20000, 30000];\n    let attempts = Number(cur.attemptCount || 1);\n    let retries = Number(cur.retryCount || 0);\n    let failing = true;\n    while (attempts < maxAttempts && failing) {\n      const delayMs = Number(delays[attempts - 1] || 20000);\n      if (delayMs > 0) { await sleep(delayMs); }\n      const r = await attempt(cur);\n      attempts = attempts + 1;\n      retries = retries + 1;\n      const merged = Object.assign({}, cur, r, { attemptCount: attempts, retryCount: retries });\n      const ev = evaluate(merged);\n      cur = Object.assign({}, merged, ev);\n      if (ev.healthStatus === 'UP' || ev.healthStatus === 'DEGRADED') { failing = false; }\n    }\n    out.push({ json: cur });\n  } else {\n    out.push({ json: j });\n  }\n}\nreturn out;"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2520,
+        0
+      ],
+      "id": "retry10-58d2acef-00b7-42bd-b",
+      "name": "10 - Retry Failed Check (Attempts 2-3)"
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "language": "javaScript",
+        "jsCode": "const items = $input.all();\nconst out = [];\nfor (const it of items) {\n  const j = it.json || {};\n  const status = j.healthStatus || 'DOWN';\n  out.push({ json: Object.assign({}, j, {\n    healthStatus: status,\n    finalStatus: status,\n    detectedBy: 'VWO Functional Downtime Tracker',\n    retryCount: Number(j.retryCount || 0),\n    attemptCount: Number(j.attemptCount || 1)\n  })});\n}\nreturn out;"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2800,
+        0
+      ],
+      "id": "fin11-ca84aace-7c54-4d8e-8",
+      "name": "11 - Determine Final Status"
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "language": "javaScript",
+        "jsCode": "// Reads the persistent per-service state saved by node 23 on the previous run.\nconst store = $getWorkflowStaticData('global');\nif (!store.vwoStates) { store.vwoStates = {}; }\nconst items = $input.all();\nconst out = [];\nfor (const it of items) {\n  const j = it.json || {};\n  const rec = store.vwoStates[j.serviceKey] || null;\n  out.push({ json: Object.assign({}, j, {\n    hasPrevState: !!rec,\n    prevCurrentStatus: rec ? rec.currentStatus : null,\n    prevIncidentId: rec ? rec.incidentId : null,\n    prevIncidentType: rec ? rec.incidentType : null,\n    prevDowntimeStart: rec ? rec.downtimeStart : null,\n    prevDowntimeStartIso: rec ? rec.downtimeStartIso : null,\n    prevDowntimeStartIST: rec ? rec.downtimeStart : null,\n    prevConsecutiveFailures: rec ? Number(rec.consecutiveFailures || 0) : 0,\n    prevConsecutiveDegradedChecks: rec ? Number(rec.consecutiveDegradedChecks || 0) : 0,\n    prevLastHttpStatus: rec ? rec.lastHttpStatus : null,\n    prevLastResponseTime: rec ? Number(rec.lastResponseTime || 0) : 0\n  })});\n}\nreturn out;"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        3080,
+        0
+      ],
+      "id": "prev12-96fb683d-f229-48d9-8",
+      "name": "12 - Load Previous Service State (Data Store)"
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "language": "javaScript",
+        "jsCode": "const items = $input.all();\nconst out = [];\nfor (const it of items) {\n  const j = it.json || {};\n  const cur = j.healthStatus || 'UNKNOWN';\n  const prevStatus = j.hasPrevState ? (j.prevCurrentStatus || 'NONE') : 'NONE';\n  const fail = cur === 'DOWN' || cur === 'FUNCTIONAL_FAILURE';\n  const consecutiveFailures = fail ? (Number(j.prevConsecutiveFailures || 0) + 1) : 0;\n  const degraded = cur === 'DEGRADED';\n  const consecutiveDegradedChecks = degraded ? (Number(j.prevConsecutiveDegradedChecks || 0) + 1) : 0;\n  const threshold = Number(j.degradedThreshold || 3);\n  let event = 'NONE';\n  let newIncident = false;\n  let recovery = false;\n  let isContinuing = false;\n  let alertNow = false;\n  let incidentRow = false;\n  if (cur === 'UP') {\n    if (prevStatus === 'DOWN' || prevStatus === 'FUNCTIONAL_FAILURE') { event = 'RECOVERY'; recovery = true; alertNow = true; }\n    else if (prevStatus === 'DEGRADED') { event = 'BACK_TO_NORMAL'; }\n    else { event = 'HEALTHY'; }\n  } else if (cur === 'DEGRADED') {\n    if (prevStatus === 'DOWN' || prevStatus === 'FUNCTIONAL_FAILURE') { event = 'IMPROVED_NOT_UP'; }\n    else if (consecutiveDegradedChecks >= threshold && prevStatus !== 'DEGRADED') { event = 'DEGRADED_ALERT'; alertNow = true; }\n    else if (prevStatus === 'DEGRADED' && j.prevIncidentId) { event = 'DEGRADED_CONTINUES'; }\n    else { event = 'DEGRADED'; }\n  } else {\n    if ((prevStatus === 'DOWN' || prevStatus === 'FUNCTIONAL_FAILURE') && j.prevIncidentId) { event = 'CONTINUES'; isContinuing = true; }\n    else { event = 'NEW_INCIDENT'; newIncident = true; alertNow = true; incidentRow = true; }\n  }\n  out.push({ json: Object.assign({}, j, {\n    event: event,\n    newIncident: newIncident,\n    recovery: recovery,\n    isContinuing: isContinuing,\n    alertNow: alertNow,\n    incidentRow: incidentRow,\n    consecutiveFailures: consecutiveFailures,\n    consecutiveDegradedChecks: consecutiveDegradedChecks,\n    prevStatus: prevStatus\n  })});\n}\nreturn out;"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        3360,
+        0
+      ],
+      "id": "trans13-a6bdca71-0e47-4f22-9",
+      "name": "13 - Detect State Transition"
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "language": "javaScript",
+        "jsCode": "const items = $input.all();\nconst out = [];\nfunction pad2(n) { n = Number(n); return (n < 10 ? '0' : '') + n; }\nfunction istStr(d) { const t = new Date(d.getTime() + 5.5 * 3600000); return t.getUTCFullYear() + '-' + pad2(t.getUTCMonth() + 1) + '-' + pad2(t.getUTCDate()) + ' ' + pad2(t.getUTCHours()) + ':' + pad2(t.getUTCMinutes()) + ':' + pad2(t.getUTCSeconds()); }\nfor (const it of items) {\n  const j = it.json || {};\n  const now = new Date();\n  const t = new Date(now.getTime() + 5.5 * 3600000);\n  const dateKey = '' + t.getUTCFullYear() + pad2(t.getUTCMonth() + 1) + pad2(t.getUTCDate());\n  const timeKey = '' + pad2(t.getUTCHours()) + pad2(t.getUTCMinutes()) + pad2(t.getUTCSeconds());\n  let incidentId = null;\n  let incidentType = null;\n  let downtimeStartIso = null;\n  let downtimeStartIST = null;\n  if (j.newIncident) {\n    incidentType = j.healthStatus === 'FUNCTIONAL_FAILURE' ? 'FUNCTIONAL' : (j.healthStatus === 'DOWN' ? 'DOWN' : 'DEGRADED');\n    incidentId = 'VWO-' + incidentType + '-' + dateKey + '-' + timeKey;\n    downtimeStartIso = now.toISOString();\n    downtimeStartIST = istStr(now);\n  } else if (j.recovery || j.isContinuing || j.alertNow) {\n    incidentId = j.prevIncidentId || null;\n    incidentType = j.prevIncidentType || null;\n    downtimeStartIso = j.prevDowntimeStartIso || now.toISOString();\n    downtimeStartIST = j.prevDowntimeStartIST || istStr(now);\n  }\n  out.push({ json: Object.assign({}, j, {\n    incidentId: incidentId,\n    incidentType: incidentType,\n    downtimeStartIso: downtimeStartIso,\n    downtimeStartIST: downtimeStartIST,\n    dateKey: dateKey,\n    timestampIST: istStr(now)\n  })});\n}\nreturn out;"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        3640,
+        0
+      ],
+      "id": "inc14-f7529a15-fce8-4b6a-9",
+      "name": "14 - Generate Incident ID"
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "language": "javaScript",
+        "jsCode": "const items = $input.all();\nconst NL = String.fromCharCode(10);\nlet downCritical = 0;\nfor (const it of items) {\n  const j = it.json || {};\n  if (j.critical === true && (j.healthStatus === 'DOWN' || j.healthStatus === 'FUNCTIONAL_FAILURE')) { downCritical = downCritical + 1; }\n}\nconst out = [];\nfor (const it of items) {\n  const j = it.json || {};\n  const cur = j.healthStatus || 'UNKNOWN';\n  const name = String(j.serviceName || '');\n  let severity = 'SEV-3';\n  if (cur === 'DOWN' || cur === 'FUNCTIONAL_FAILURE') {\n    if ((name.indexOf('Main') > -1 || name.indexOf('Login') > -1) || (j.critical === true && downCritical >= 2)) { severity = 'SEV-1'; }\n    else if (j.critical === true) { severity = 'SEV-2'; }\n    else { severity = 'SEV-3'; }\n  } else if (cur === 'DEGRADED') { severity = 'SEV-4'; }\n  const node = Object.assign({}, j, { severity: severity });\n  if (j.alertNow) {\n    if (cur === 'DOWN') {\n      node.alertMessage = 'VWO SERVICE DOWN' + NL + 'Environment: ' + (j.environment || '') + NL + 'Service: ' + (j.serviceName || '') + NL + 'Severity: ' + severity + NL + 'Endpoint: ' + (j.url || '') + NL + 'Failure: ' + (j.failureCategory || '') + NL + 'Reason: ' + (j.failureReason || '') + NL + 'HTTP Status: ' + (j.httpStatus === null || j.httpStatus === undefined ? 'N/A' : j.httpStatus) + NL + 'Response Time: ' + (j.responseTimeMs || 0) + ' ms' + NL + 'Retry Attempts: ' + (j.retryCount || 0) + NL + 'Downtime Started: ' + (j.downtimeStartIST || j.timestampIST || '') + NL + 'Incident: ' + (j.incidentId || '') + NL + 'Detected by: VWO Functional Downtime Tracker';\n    } else if (cur === 'FUNCTIONAL_FAILURE') {\n      node.alertMessage = 'VWO FUNCTIONAL FAILURE' + NL + 'Service is technically reachable but expected functionality failed.' + NL + 'Environment: ' + (j.environment || '') + NL + 'Service: ' + (j.serviceName || '') + NL + 'Endpoint: ' + (j.url || '') + NL + 'HTTP: ' + (j.httpStatus === null || j.httpStatus === undefined ? 'N/A' : j.httpStatus) + NL + 'Functional Validation: FAILED' + NL + 'Expected: ' + (j.expectedValueStr || j.expectedText || j.expectedJsonField || '') + NL + 'Actual: ' + (j.actualValue || j.failureReason || '') + NL + 'Incident: ' + (j.incidentId || '') + NL + 'Time: ' + (j.timestampIST || '');\n    } else {\n      node.alertMessage = 'VWO PERFORMANCE DEGRADATION' + NL + 'Environment: ' + (j.environment || '') + NL + 'Service: ' + (j.serviceName || '') + NL + 'Severity: ' + severity + NL + 'Endpoint: ' + (j.url || '') + NL + 'Response Time: ' + (j.responseTimeMs || 0) + ' ms (threshold ' + (j.responseTimeThresholdMs || 0) + ' ms)' + NL + 'Consecutive slow checks: ' + (j.consecutiveDegradedChecks || 0) + NL + 'Time: ' + (j.timestampIST || '');\n    }\n  }\n  if (j.newIncident) {\n    node.aiSystemPrompt = 'You are a senior QA/SRE engineer analysing a VWO monitoring incident. Return STRICT JSON only with keys: rootCauseHypotheses (array of 3 short strings), impactAssessment (string), recommendedNextSteps (array of 3 strings), summary (string max 2 sentences).';\n    node.aiContext = 'Incident context:' + NL + 'Application: ' + (j.application || '') + NL + 'Environment: ' + (j.environment || '') + NL + 'Service: ' + (j.serviceName || '') + NL + 'Check type: ' + (j.checkType || '') + NL + 'Endpoint: ' + (j.url || '') + NL + 'HTTP status: ' + (j.httpStatus === null || j.httpStatus === undefined ? 'N/A' : j.httpStatus) + NL + 'Failure category: ' + (j.failureCategory || '') + NL + 'Failure reason: ' + (j.failureReason || '') + NL + 'Response time ms: ' + (j.responseTimeMs || 0) + NL + 'Retries: ' + (j.retryCount || 0) + NL + 'Severity: ' + severity + NL + 'Incident id: ' + (j.incidentId || '') + NL + 'Raw response preview: ' + String(j.rawBody || '').slice(0, 1200);\n  }\n  out.push({ json: node });\n}\nreturn out;"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        3920,
+        0
+      ],
+      "id": "sev15-05ab63ad-62c7-44e2-9",
+      "name": "15 - Determine Severity & Alert Payload"
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "language": "javaScript",
+        "jsCode": "const items = $input.all();\nreturn items.filter(function (it) { return it.json && it.json.alertNow === true; });"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        4200,
+        -320
+      ],
+      "id": "filtA16-f4ec1564-f170-405d-8",
+      "name": "16 - Filter Items for AI & Alerts"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.groq.com/openai/v1/chat/completions",
+        "sendHeaders": false,
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "{\n  \"model\": {{ JSON.stringify($json._monitor.groqModel) }},\n  \"temperature\": 0.2,\n  \"response_format\": { \"type\": \"json_object\" },\n  \"messages\": [\n    { \"role\": \"system\", \"content\": {{ JSON.stringify($json.aiSystemPrompt) }} },\n    { \"role\": \"user\", \"content\": {{ JSON.stringify($json.aiContext) }} }\n  ]\n}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        4480,
+        -320
+      ],
+      "id": "groq17-18bf15da-e123-4f6e-b",
+      "name": "16a - Groq AI Incident Summary (qwen/qwen3.8-27b)",
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "",
+          "name": "Groq Header Auth"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "language": "javaScript",
+        "jsCode": "const items = $input.all();\nconst out = [];\nfor (const it of items) {\n  const j = it.json || {};\n  let content = '';\n  try { content = (j.choices && j.choices[0] && j.choices[0].message && j.choices[0].message.content) || ''; } catch (e) { content = ''; }\n  let ai = { rootCauseHypotheses: [], impactAssessment: '', recommendedNextSteps: [], summary: '' };\n  if (content) {\n    try {\n      const parsed = JSON.parse(content);\n      if (parsed && typeof parsed === 'object') { ai = parsed; }\n    } catch (e) { ai = { rootCauseHypotheses: [], impactAssessment: '', recommendedNextSteps: [], summary: content.slice(0, 500) }; }\n  }\n  out.push({ json: Object.assign({}, j, {\n    aiSummaryText: ai.summary || '',\n    aiRootCause: (ai.rootCauseHypotheses || []).join(' | '),\n    aiImpact: ai.impactAssessment || '',\n    aiNextSteps: (ai.recommendedNextSteps || []).join(' | ')\n  })});\n}\nreturn out;"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        4760,
+        -320
+      ],
+      "id": "parseai18-caade9c4-99a2-4256-8",
+      "name": "16b - Parse & Attach AI Summary"
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "language": "javaScript",
+        "jsCode": "const items = $input.all();\nconst out = [];\nfor (const it of items) {\n  const j = it.json || {};\n  if (j.incidentRow !== true) { continue; }\n  const remarks = ('AI: ' + (j.aiSummaryText || '') + ' | Root cause hint: ' + (j.aiRootCause || '')).slice(0, 500);\n  const row = {\n    'Incident ID': j.incidentId || '',\n    'Application': j.application || 'VWO',\n    'Environment': j.environment || '',\n    'Service Name': j.serviceName || '',\n    'Service Type': j.checkType || '',\n    'Endpoint': j.url || '',\n    'Severity': j.severity || '',\n    'Failure Category': j.failureCategory || '',\n    'Failure Reason': j.failureReason || '',\n    'Downtime Start': j.downtimeStartIST || j.timestampIST || '',\n    'Recovery Time': '',\n    'Downtime Seconds': 0,\n    'Downtime Minutes': 0,\n    'Status': 'OPEN',\n    'HTTP Status': (j.httpStatus === null || j.httpStatus === undefined) ? '' : j.httpStatus,\n    'Last Response Time Ms': j.responseTimeMs || 0,\n    'Retry Count': j.retryCount || 0,\n    'Detected By': 'VWO Functional Downtime Tracker',\n    'Incident Date': (j.downtimeStartIST || j.timestampIST || '').slice(0, 10),\n    'Remarks': remarks\n  };\n  out.push({ json: row });\n}\nreturn out;"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        5040,
+        -500
+      ],
+      "id": "incrow19-be446b84-c310-4d16-8",
+      "name": "16c - Keep Only New Incidents"
+    },
+    {
+      "parameters": {
+        "operation": "append",
+        "documentId": {
+          "__rl": true,
+          "mode": "list",
+          "value": "REPLACE_WITH_SPREADSHEET_ID"
+        },
+        "sheetName": "Downtime_Incidents",
+        "columns": {
+          "mappingMode": "autoMapInputData",
+          "value": {},
+          "matchingColumns": [],
+          "schema": []
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4,
+      "position": [
+        5320,
+        -500
+      ],
+      "id": "gsInc20-790b88ef-e66c-41e8-b",
+      "name": "16d - Save Downtime Incident (Google Sheets)",
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "",
+          "name": "Google Sheets account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "channel": {
+          "__rl": true,
+          "mode": "id",
+          "value": "={{ $json._monitor.slackChannelId }}"
+        },
+        "text": "={{ $json.alertMessage }}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.slack",
+      "typeVersion": 2.1,
+      "position": [
+        5040,
+        -140
+      ],
+      "id": "slackDown21-06718245-a603-427c-a",
+      "name": "17 - Send Downtime / Functional Alert (Slack)",
+      "credentials": {
+        "slackApi": {
+          "id": "",
+          "name": "Slack account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "language": "javaScript",
+        "jsCode": "const items = $input.all();\nconst out = [];\nfor (const it of items) {\n  const j = it.json || {};\n  const row = {\n    'Timestamp': j.timestampIST || '',\n    'Application': j.application || 'VWO',\n    'Environment': j.environment || '',\n    'Service Name': j.serviceName || '',\n    'Endpoint': j.url || '',\n    'Check Type': j.checkType || '',\n    'HTTP Status': (j.httpStatus === null || j.httpStatus === undefined) ? '' : j.httpStatus,\n    'Response Time Ms': j.responseTimeMs || 0,\n    'Health Status': j.healthStatus || '',\n    'Functional Validation': j.validationResult || '',\n    'Retry Count': j.retryCount || 0,\n    'Error Category': j.failureCategory || '',\n    'Error Message': (j.failureReason || '').slice(0, 500),\n    'Workflow Execution ID': j.runId || ''\n  };\n  out.push({ json: row });\n}\nreturn out;"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        4200,
+        160
+      ],
+      "id": "histrows22-c3ac11ab-f075-4a6a-b",
+      "name": "18a - Build Health History Rows"
+    },
+    {
+      "parameters": {
+        "operation": "append",
+        "documentId": {
+          "__rl": true,
+          "mode": "list",
+          "value": "REPLACE_WITH_SPREADSHEET_ID"
+        },
+        "sheetName": "Health_Check_History",
+        "columns": {
+          "mappingMode": "autoMapInputData",
+          "value": {},
+          "matchingColumns": [],
+          "schema": []
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4,
+      "position": [
+        4480,
+        160
+      ],
+      "id": "gsHist23-b6e2fdf9-1811-4003-b",
+      "name": "18 - Log Health Check (Google Sheets)",
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "",
+          "name": "Google Sheets account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "language": "javaScript",
+        "jsCode": "const items = $input.all();\nreturn items.filter(function (it) { return it.json && it.json.recovery === true; });"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        4200,
+        480
+      ],
+      "id": "detrec24-7133fe31-64a5-4aad-8",
+      "name": "19 - Detect Recovery"
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "language": "javaScript",
+        "jsCode": "const items = $input.all();\nconst out = [];\nfunction pad2(n) { n = Number(n); return (n < 10 ? '0' : '') + n; }\nfunction istStr(d) { const t = new Date(d.getTime() + 5.5 * 3600000); return t.getUTCFullYear() + '-' + pad2(t.getUTCMonth() + 1) + '-' + pad2(t.getUTCDate()) + ' ' + pad2(t.getUTCHours()) + ':' + pad2(t.getUTCMinutes()) + ':' + pad2(t.getUTCSeconds()); }\nfunction humanize(s) {\n  s = Number(s) || 0;\n  const h = Math.floor(s / 3600);\n  const m = Math.floor((s % 3600) / 60);\n  const sec = s % 60;\n  if (h > 0) { return h + ' hours ' + m + ' minutes'; }\n  if (m > 0) { return m + ' minutes ' + sec + ' seconds'; }\n  return sec + ' seconds';\n}\nfor (const it of items) {\n  const j = it.json || {};\n  const now = new Date();\n  let seconds = 0;\n  if (j.downtimeStartIso) {\n    const st = Date.parse(j.downtimeStartIso);\n    if (!isNaN(st)) { seconds = Math.max(0, Math.floor((now.getTime() - st) / 1000)); }\n  }\n  const minutes = Math.round((seconds / 60) * 100) / 100;\n  const human = humanize(seconds);\n  const NL = String.fromCharCode(10);\n  const recoveryMessage = 'VWO SERVICE RECOVERED' + NL + 'Environment: ' + (j.environment || '') + NL + 'Service: ' + (j.serviceName || '') + NL + 'Incident: ' + (j.incidentId || '') + NL + 'Recovered: ' + istStr(now) + NL + 'Downtime: ' + human + NL + 'Latest Response Time: ' + (j.responseTimeMs || 0) + ' ms' + NL + 'Final Status: UP' + NL + 'The incident has automatically been marked RESOLVED.';\n  out.push({ json: Object.assign({}, j, {\n    recoveryTimeISO: now.toISOString(),\n    recoveryTimeIST: istStr(now),\n    downtimeSeconds: seconds,\n    downtimeMinutes: minutes,\n    downtimeHumanReadable: human,\n    recoveryMessage: recoveryMessage\n  })});\n}\nreturn out;"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        4480,
+        480
+      ],
+      "id": "downtime25-13e56c92-42d8-446a-8",
+      "name": "20 - Calculate Downtime Duration"
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "language": "javaScript",
+        "jsCode": "const items = $input.all();\nconst out = [];\nfor (const it of items) {\n  const j = it.json || {};\n  const row = {\n    'Incident ID': j.incidentId || '',\n    'Recovery Time': j.recoveryTimeIST || '',\n    'Downtime Seconds': j.downtimeSeconds || 0,\n    'Downtime Minutes': j.downtimeMinutes || 0,\n    'Status': 'RESOLVED'\n  };\n  out.push({ json: row });\n}\nreturn out;"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        4760,
+        340
+      ],
+      "id": "resrow26-0e94085c-70e6-4921-a",
+      "name": "20b - Build Resolution Row"
+    },
+    {
+      "parameters": {
+        "operation": "update",
+        "documentId": {
+          "__rl": true,
+          "mode": "list",
+          "value": "REPLACE_WITH_SPREADSHEET_ID"
+        },
+        "sheetName": "Downtime_Incidents",
+        "columns": {
+          "mappingMode": "autoMapInputData",
+          "value": {},
+          "matchingColumns": [
+            "Incident ID"
+          ],
+          "schema": []
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4,
+      "position": [
+        5040,
+        340
+      ],
+      "id": "gsResolve27-84c0cee3-e6d6-4172-b",
+      "name": "21 - Resolve Downtime Incident (Google Sheets)",
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "",
+          "name": "Google Sheets account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "channel": {
+          "__rl": true,
+          "mode": "id",
+          "value": "={{ $json._monitor.slackChannelId }}"
+        },
+        "text": "={{ $json.recoveryMessage }}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.slack",
+      "typeVersion": 2.1,
+      "position": [
+        4760,
+        620
+      ],
+      "id": "slackRec28-ea00d6ab-c49d-46a2-9",
+      "name": "22 - Send Recovery Notification (Slack)",
+      "credentials": {
+        "slackApi": {
+          "id": "",
+          "name": "Slack account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "language": "javaScript",
+        "jsCode": "const items = $input.all();\nconst store = $getWorkflowStaticData('global');\nif (!store.vwoStates) { store.vwoStates = {}; }\nif (!store.vwoResolved) { store.vwoResolved = []; }\nfunction pad2(n) { n = Number(n); return (n < 10 ? '0' : '') + n; }\nfunction istStr(d) { const t = new Date(d.getTime() + 5.5 * 3600000); return t.getUTCFullYear() + '-' + pad2(t.getUTCMonth() + 1) + '-' + pad2(t.getUTCDate()) + ' ' + pad2(t.getUTCHours()) + ':' + pad2(t.getUTCMinutes()) + ':' + pad2(t.getUTCSeconds()); }\nconst nowIST = istStr(new Date());\nfor (const it of items) {\n  const j = it.json || {};\n  const key = j.serviceKey;\n  const st = store.vwoStates[key] || {};\n  if (j.recovery === true && j.incidentId) {\n    store.vwoResolved.push({ incidentId: j.incidentId, serviceName: j.serviceName, environment: j.environment, severity: j.severity, downtimeMinutes: Number(j.downtimeMinutes || 0), detectedAt: j.downtimeStartIST || nowIST, resolvedAt: j.timestampIST || nowIST });\n    if (store.vwoResolved.length > 300) { store.vwoResolved.shift(); }\n  }\n  let openIncidentId = st.incidentId || null;\n  let openDowntimeStartIST = st.downtimeStart || null;\n  let openDowntimeStartIso = st.downtimeStartIso || null;\n  const curDownish = j.healthStatus === 'DOWN' || j.healthStatus === 'FUNCTIONAL_FAILURE';\n  if (j.newIncident) { openIncidentId = j.incidentId; openDowntimeStartIST = j.downtimeStartIST; openDowntimeStartIso = j.downtimeStartIso; }\n  else if (!curDownish) { openIncidentId = null; openDowntimeStartIST = null; openDowntimeStartIso = null; }\n  store.vwoStates[key] = {\n    serviceKey: key,\n    application: j.application || st.application || 'VWO',\n    environment: j.environment || st.environment || '',\n    serviceName: j.serviceName || st.serviceName || '',\n    url: j.url || st.url || '',\n    currentStatus: j.healthStatus || st.currentStatus || 'UNKNOWN',\n    previousStatus: st.currentStatus || j.healthStatus || 'UNKNOWN',\n    incidentId: openIncidentId,\n    incidentType: j.incidentType || st.incidentType || null,\n    downtimeStart: openDowntimeStartIST,\n    downtimeStartIso: openDowntimeStartIso,\n    lastCheckedAt: nowIST,\n    lastSuccessfulCheck: (j.healthStatus === 'UP') ? nowIST : (st.lastSuccessfulCheck || ''),\n    consecutiveFailures: Number(j.consecutiveFailures !== undefined ? j.consecutiveFailures : 0),\n    consecutiveDegradedChecks: Number(j.consecutiveDegradedChecks !== undefined ? j.consecutiveDegradedChecks : 0),\n    lastHttpStatus: (j.httpStatus === null || j.httpStatus === undefined) ? (st.lastHttpStatus || null) : j.httpStatus,\n    lastResponseTime: Number(j.responseTimeMs || 0),\n    recoveryTime: j.recovery ? (j.recoveryTimeIST || nowIST) : (st.recoveryTime || ''),\n    lastDowntimeMinutes: j.recovery ? Number(j.downtimeMinutes || 0) : Number(st.lastDowntimeMinutes || 0),\n    severity: j.severity || st.severity || ''\n  };\n}\nreturn items;"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        4200,
+        0
+      ],
+      "id": "updstate29-2c5782b5-1aef-4320-9",
+      "name": "23 - Update Service State (Data Store)"
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "language": "javaScript",
+        "jsCode": "const items = $input.all();\nconst store = $getWorkflowStaticData('global');\nif (!store.vwoDayTotals) { store.vwoDayTotals = {}; }\nif (!store.vwoDayDate) { store.vwoDayDate = ''; }\nif (!store.vwoResolved) { store.vwoResolved = []; }\nif (!store.vwoFirstRun) { store.vwoFirstRun = new Date().toISOString(); }\nfunction pad2(n) { n = Number(n); return (n < 10 ? '0' : '') + n; }\nfunction istParts(d) { const t = new Date(d.getTime() + 5.5 * 3600000); return { date: t.getUTCFullYear() + '-' + pad2(t.getUTCMonth() + 1) + '-' + pad2(t.getUTCDate()), minutesOfDay: t.getUTCHours() * 60 + t.getUTCMinutes() + t.getUTCSeconds() / 60 }; }\nconst now = new Date();\nconst part = istParts(now);\n// --- counts for this run ---\nconst serviceDefs = {};\nfor (const it of items) {\n  const j = it.json || {};\n  if (!serviceDefs[j.serviceKey]) { serviceDefs[j.serviceKey] = { application: j.application || 'VWO', environment: j.environment || '', serviceName: j.serviceName || '', critical: j.critical === true }; }\n}\nconst keys = Object.keys(serviceDefs);\nlet servicesUp = 0, servicesDown = 0, servicesDegraded = 0, functionalFailures = 0;\nfor (const it of items) {\n  const s = it.json && it.json.healthStatus;\n  if (s === 'UP') { servicesUp = servicesUp + 1; }\n  else if (s === 'DOWN') { servicesDown = servicesDown + 1; }\n  else if (s === 'DEGRADED') { servicesDegraded = servicesDegraded + 1; }\n  else if (s === 'FUNCTIONAL_FAILURE') { functionalFailures = functionalFailures + 1; }\n}\nconst downList = items.filter(function (it) { return it.json && it.json.healthStatus === 'DOWN'; });\nconst mainDown = downList.some(function (it) { return String(it.json.serviceName || '').indexOf('Main') > -1; });\nconst loginDown = downList.some(function (it) { return String(it.json.serviceName || '').indexOf('Login') > -1; });\nconst criticalDownCount = downList.filter(function (it) { return it.json.critical === true; }).length;\nlet overallStatus = 'HEALTHY';\nif (mainDown || loginDown || criticalDownCount >= 2) { overallStatus = 'DOWN'; }\nelse if (items.some(function (it) { return (it.json.healthStatus === 'FUNCTIONAL_FAILURE'); })) { overallStatus = 'PARTIALLY_AVAILABLE'; }\nelse if (servicesDown > 0) { overallStatus = 'PARTIALLY_AVAILABLE'; }\nelse if (servicesDegraded > 0) { overallStatus = 'DEGRADED'; }\n// --- daily rolling totals (roll over at midnight IST) ---\nif (store.vwoDayDate !== part.date) {\n  store.vwoDayTotals = {};\n  store.vwoDayDate = part.date;\n}\n// accumulate each service from this run\nfor (const it of items) {\n  const j = it.json || {};\n  const k = j.serviceKey;\n  const tot = store.vwoDayTotals[k] || { totalChecks: 0, successful: 0, failed: 0, degraded: 0, functionalFailures: 0, downtimeIncidents: 0, downtimeMinutes: 0, responseSum: 0, maxResponseTime: 0, responseCount: 0 };\n  tot.totalChecks = tot.totalChecks + 1;\n  if (j.healthStatus === 'UP') { tot.successful = tot.successful + 1; }\n  else if (j.healthStatus === 'DOWN') { tot.failed = tot.failed + 1; }\n  else if (j.healthStatus === 'DEGRADED') { tot.degraded = tot.degraded + 1; }\n  else if (j.healthStatus === 'FUNCTIONAL_FAILURE') { tot.functionalFailures = tot.functionalFailures + 1; }\n  if (j.newIncident) { tot.downtimeIncidents = tot.downtimeIncidents + 1; }\n  if (j.recovery) { tot.downtimeMinutes = tot.downtimeMinutes + Number(j.downtimeMinutes || 0); }\n  tot.responseSum = tot.responseSum + Number(j.responseTimeMs || 0);\n  tot.responseCount = tot.responseCount + 1;\n  if (Number(j.responseTimeMs || 0) > tot.maxResponseTime) { tot.maxResponseTime = Number(j.responseTimeMs || 0); }\n  store.vwoDayTotals[k] = tot;\n}\n// --- MTTR / MTBF from resolved incidents ---\nlet resolved = store.vwoResolved || [];\nconst incidentsCount = resolved.length;\nlet totalDowntimeMinutes = 0;\nfor (const r of resolved) { totalDowntimeMinutes = totalDowntimeMinutes + Number(r.downtimeMinutes || 0); }\nconst mttr = incidentsCount > 0 ? Math.round((totalDowntimeMinutes / incidentsCount) * 100) / 100 : 0;\nconst firstRun = Date.parse(store.vwoFirstRun || now.toISOString());\nconst elapsedHours = Math.max(0, (now.getTime() - firstRun) / 3600000);\nconst uptimeHours = Math.max(0, elapsedHours - totalDowntimeMinutes / 60);\nconst mtbfHours = incidentsCount > 0 ? Math.round((uptimeHours / incidentsCount) * 100) / 100 : 0;\nconst elapsedMinutes = Math.max(1, part.minutesOfDay);\nconst out = [];\nfor (const k of keys) {\n  const def = serviceDefs[k];\n  const tot = store.vwoDayTotals[k] || { totalChecks: 0, successful: 0, failed: 0, degraded: 0, functionalFailures: 0, downtimeIncidents: 0, downtimeMinutes: 0, responseSum: 0, maxResponseTime: 0, responseCount: 0 };\n  const availability = Math.max(0, Math.min(100, ((elapsedMinutes - (tot.downtimeMinutes || 0)) / elapsedMinutes) * 100));\n  const avgRt = tot.responseCount > 0 ? Math.round((tot.responseSum / tot.responseCount) * 100) / 100 : 0;\n  const row = {\n    'Date': part.date,\n    'Environment': def.environment,\n    'Service Name': def.serviceName,\n    'Total Checks': tot.totalChecks,\n    'Successful Checks': tot.successful,\n    'Failed Checks': tot.failed,\n    'Degraded Checks': tot.degraded,\n    'Functional Failures': tot.functionalFailures,\n    'Downtime Incidents': tot.downtimeIncidents,\n    'Total Downtime Minutes': Math.round(tot.downtimeMinutes * 100) / 100,\n    'Availability Percentage': Math.round(availability * 100) / 100,\n    'Average Response Time Ms': avgRt,\n    'Maximum Response Time Ms': tot.maxResponseTime\n  };\n  // dashboard-ready metrics snapshot attached for later dashboards (spec 26)\n  row.metrics = { overallStatus: overallStatus, servicesChecked: items.length, servicesUp: servicesUp, servicesDown: servicesDown, servicesDegraded: servicesDegraded, functionalFailures: functionalFailures, overallAvailabilityPct: Math.round(availability * 100) / 100, incidentCount: incidentsCount, mttrMinutes: mttr, mtbfHours: mtbfHours, totalDowntimeMinutes: Math.round(totalDowntimeMinutes * 100) / 100, p95ResponseTimeMs: 0, maxResponseTimeMs: tot.maxResponseTime };\n  out.push({ json: row });\n}\n// overall row\nout.push({ json: {\n  'Date': part.date,\n  'Environment': 'OVERALL',\n  'Service Name': 'ALL_SERVICES',\n  'Total Checks': items.length,\n  'Successful Checks': servicesUp,\n  'Failed Checks': servicesDown,\n  'Degraded Checks': servicesDegraded,\n  'Functional Failures': functionalFailures,\n  'Downtime Incidents': incidentsCount,\n  'Total Downtime Minutes': Math.round(totalDowntimeMinutes * 100) / 100,\n  'Availability Percentage': 0,\n  'Average Response Time Ms': 0,\n  'Maximum Response Time Ms': 0,\n  metrics: { overallStatus: overallStatus, servicesChecked: items.length, servicesUp: servicesUp, servicesDown: servicesDown, servicesDegraded: servicesDegraded, functionalFailures: functionalFailures, incidentCount: incidentsCount, mttrMinutes: mttr, mtbfHours: mtbfHours, totalDowntimeMinutes: Math.round(totalDowntimeMinutes * 100) / 100 }\n} });\nreturn out;"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        4480,
+        0
+      ],
+      "id": "agg30-f2208597-634e-49d7-a",
+      "name": "24 - Aggregate Overall VWO Health"
+    },
+    {
+      "parameters": {
+        "operation": "update",
+        "documentId": {
+          "__rl": true,
+          "mode": "list",
+          "value": "REPLACE_WITH_SPREADSHEET_ID"
+        },
+        "sheetName": "Daily_Availability",
+        "columns": {
+          "mappingMode": "autoMapInputData",
+          "value": {},
+          "matchingColumns": [
+            "Date",
+            "Service Name",
+            "Environment"
+          ],
+          "schema": []
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4,
+      "position": [
+        4760,
+        0
+      ],
+      "id": "gsDaily31-a98fb3e6-863c-497d-b",
+      "name": "24a - Update Daily Availability (Google Sheets)",
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "",
+          "name": "Google Sheets account"
+        }
+      }
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "01 - Start Scheduled Monitoring": {
+      "main": [
+        [
+          {
+            "node": "02 - Load VWO Service Configuration",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "02 - Load VWO Service Configuration": {
+      "main": [
+        [
+          {
+            "node": "03 - Loop Through Services",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "03 - Loop Through Services": {
+      "main": [
+        [
+          {
+            "node": "04 - Prepare Health Check",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "04 - Prepare Health Check": {
+      "main": [
+        [
+          {
+            "node": "05 - Execute Health Check (Attempt 1)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "05 - Execute Health Check (Attempt 1)": {
+      "main": [
+        [
+          {
+            "node": "06 - Calculate Response Time",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "06 - Calculate Response Time": {
+      "main": [
+        [
+          {
+            "node": "07 - Validate Technical Response",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "07 - Validate Technical Response": {
+      "main": [
+        [
+          {
+            "node": "08 - Validate Functional Response",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "08 - Validate Functional Response": {
+      "main": [
+        [
+          {
+            "node": "09 - Classify Service Health",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "09 - Classify Service Health": {
+      "main": [
+        [
+          {
+            "node": "10 - Retry Failed Check (Attempts 2-3)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "10 - Retry Failed Check (Attempts 2-3)": {
+      "main": [
+        [
+          {
+            "node": "11 - Determine Final Status",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "11 - Determine Final Status": {
+      "main": [
+        [
+          {
+            "node": "12 - Load Previous Service State (Data Store)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "12 - Load Previous Service State (Data Store)": {
+      "main": [
+        [
+          {
+            "node": "13 - Detect State Transition",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "13 - Detect State Transition": {
+      "main": [
+        [
+          {
+            "node": "14 - Generate Incident ID",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "14 - Generate Incident ID": {
+      "main": [
+        [
+          {
+            "node": "15 - Determine Severity & Alert Payload",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "15 - Determine Severity & Alert Payload": {
+      "main": [
+        [
+          {
+            "node": "16 - Filter Items for AI & Alerts",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "18a - Build Health History Rows",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "19 - Detect Recovery",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "23 - Update Service State (Data Store)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "16 - Filter Items for AI & Alerts": {
+      "main": [
+        [
+          {
+            "node": "16a - Groq AI Incident Summary (qwen/qwen3.8-27b)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "16a - Groq AI Incident Summary (qwen/qwen3.8-27b)": {
+      "main": [
+        [
+          {
+            "node": "16b - Parse & Attach AI Summary",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "16b - Parse & Attach AI Summary": {
+      "main": [
+        [
+          {
+            "node": "16c - Keep Only New Incidents",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "17 - Send Downtime / Functional Alert (Slack)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "16c - Keep Only New Incidents": {
+      "main": [
+        [
+          {
+            "node": "16d - Save Downtime Incident (Google Sheets)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "18a - Build Health History Rows": {
+      "main": [
+        [
+          {
+            "node": "18 - Log Health Check (Google Sheets)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "19 - Detect Recovery": {
+      "main": [
+        [
+          {
+            "node": "20 - Calculate Downtime Duration",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "20 - Calculate Downtime Duration": {
+      "main": [
+        [
+          {
+            "node": "20b - Build Resolution Row",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "22 - Send Recovery Notification (Slack)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "20b - Build Resolution Row": {
+      "main": [
+        [
+          {
+            "node": "21 - Resolve Downtime Incident (Google Sheets)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "23 - Update Service State (Data Store)": {
+      "main": [
+        [
+          {
+            "node": "24 - Aggregate Overall VWO Health",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "24 - Aggregate Overall VWO Health": {
+      "main": [
+        [
+          {
+            "node": "24a - Update Daily Availability (Google Sheets)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "binaryMode": "separate"
+  },
+  "versionId": "d4e5f6a7-b8c9-4d0e-8f1a-2b3c4d5e6f70",
+  "meta": {
+    "templateCredsSetupCompleted": false,
+    "instanceId": "import-new-workflow"
+  },
+  "nodeGroups": [],
+  "id": "09DownTimeTracker",
+  "tags": []
+}

@@ -1,0 +1,1206 @@
+{
+  "name": "09b_DownTime_Tracker_API",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "get",
+        "path": "health-status",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [
+        0,
+        240
+      ],
+      "id": "wh-001-e7b1a4c9",
+      "name": "API 01 - GET health-status",
+      "webhookId": "vwo-qa-health-status"
+    },
+    {
+      "parameters": {
+        "documentId": {
+          "__rl": true,
+          "mode": "list",
+          "value": "REPLACE_WITH_SPREADSHEET_ID"
+        },
+        "sheetName": {
+          "__rl": true,
+          "mode": "list",
+          "value": "Health_Check_History"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.5,
+      "position": [
+        260,
+        240
+      ],
+      "id": "gs-002-e7b1a4c9",
+      "name": "API 01a - Read Health Check History"
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "language": "javascript",
+        "jsCode": "const S = (v) => (v === undefined || v === null) ? '' : String(v).trim();\nconst NUM = (v) => { const n = Number(String(v === undefined || v === null ? '' : v).replace(/[^0-9.\\-]/g, '')); return Number.isFinite(n) ? n : 0; };\nconst pick = (row, keys, fallback) => { for (const k of keys) { const v = row[k]; if (v !== undefined && v !== null && String(v) !== '') return v; } return fallback === undefined ? '' : fallback; };\nconst STATUS_MAP = { UP: 'HEALTHY', HEALTHY: 'HEALTHY', DEGRADED: 'SLOW', SLOW: 'SLOW', DOWN: 'DOWN', FUNCTIONAL_FAILURE: 'FUNCTIONAL_FAILURE', RETRYING: 'RETRYING', UNKNOWN: 'UNKNOWN' };\nconst normStatus = (v) => STATUS_MAP[S(v).toUpperCase()] || 'UNKNOWN';\nconst isoTs = (v) => { const s = S(v); if (!s) return null; const m = s.match(/^(\\d{4})-(\\d{2})-(\\d{2})[ T](\\d{2}):(\\d{2}):(\\d{2})/); if (m) return new Date(m[1] + '-' + m[2] + '-' + m[3] + 'T' + m[4] + ':' + m[5] + ':' + m[6] + '+05:30').toISOString(); const d = new Date(s); return isNaN(d.getTime()) ? null : d.toISOString(); };\nconst slug = (v) => 'svc-' + S(v).toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '');\nconst env = (row) => S(pick(row, ['Environment', 'environment'], 'QA')) || 'QA';\nconst svcName = (row) => S(pick(row, ['Service Name', 'serviceName']));\nconst rows = () => $input.all().map((it) => it.json || {});\nconst MAX_ROWS = 1000;\nlet query = {};\ntry { query = ($('API 01 - GET health-status').first().json || {}).query || {}; } catch (e) { query = {}; }\nconst envFilter = S(query.environment || query.env || '');\nconst idFilter = S(query.id || '');\n\nlet data = rows();\nif (envFilter) { data = data.filter((row) => env(row).toLowerCase() === envFilter.toLowerCase()); }\n\n// Latest row per service (Health_Check_History is append-only).\nconst latest = {};\nfor (const row of data) {\n  const name = svcName(row);\n  if (!name) continue;\n  const key = env(row) + '::' + name;\n  const ts = S(pick(row, ['Timestamp', 'timestamp']));\n  if (!latest[key] || ts > S(pick(latest[key], ['Timestamp', 'timestamp']))) latest[key] = row;\n}\n\nconst services = Object.keys(latest).map((key) => {\n  const row = latest[key];\n  const name = svcName(row);\n  const status = normStatus(pick(row, ['Health Status', 'healthStatus']));\n  const retryCount = NUM(pick(row, ['Retry Count', 'retryCount'], 0));\n  const threshold = NUM(pick(row, ['Response Time Threshold Ms', 'responseTimeThresholdMs'], 3000)) || 3000;\n  const endpoint = S(pick(row, ['Endpoint', 'url']));\n  return {\n    id: slug(name),\n    name: name,\n    application: S(pick(row, ['Application', 'application'], 'VWO')) || 'VWO',\n    environment: env(row),\n    checkType: (S(pick(row, ['Check Type', 'checkType'], 'HTTP')) || 'HTTP').toUpperCase(),\n    endpoint: endpoint,\n    url: endpoint,\n    httpMethod: 'GET',\n    expectedStatus: 200,\n    responseTimeThresholdMs: threshold,\n    critical: /main|login|api/i.test(name),\n    retryPolicy: { maxAttempts: 3, delaysSeconds: [20, 30] },\n    status: status,\n    httpStatus: NUM(pick(row, ['HTTP Status', 'httpStatus'], 0)) || null,\n    responseTimeMs: NUM(pick(row, ['Response Time Ms', 'responseTimeMs'], 0)),\n    attempts: retryCount + 1,\n    lastCheckedAt: isoTs(pick(row, ['Timestamp', 'timestamp'])),\n    consecutiveSlowChecks: status === 'SLOW' ? 1 : 0,\n  };\n});\n\nconst totalRows = data.length;\nconst passedRows = data.filter((row) => normStatus(pick(row, ['Health Status', 'healthStatus'])) === 'HEALTHY').length;\nconst uptimePct = totalRows ? Math.round((passedRows / totalRows) * 10000) / 100 : 0;\nconst downCount = services.filter((s) => s.status === 'DOWN' || s.status === 'FUNCTIONAL_FAILURE').length;\nconst healthyCount = services.length - downCount;\nconst avgMs = services.length\n  ? Math.round(services.reduce((sum, s) => sum + s.responseTimeMs, 0) / services.length)\n  : 0;\nconst lastChecked = services.reduce((acc, s) => (s.lastCheckedAt && s.lastCheckedAt > acc ? s.lastCheckedAt : acc), '');\n\nreturn [{ json: {\n  summary: {\n    overallStatus: services.length === 0 ? 'UNKNOWN' : (healthyCount === 0 ? 'DOWN' : (uptimePct >= 99.9 ? 'HEALTHY' : 'SLOW')),\n    servicesMonitored: services.length,\n    healthyServices: healthyCount,\n    failedServices: downCount,\n    activeIncidents: 0,\n    averageResponseTimeMs: avgMs,\n    uptimePct: uptimePct,\n    lastCheckedAt: lastChecked || new Date().toISOString(),\n  },\n  services: services,\n} }];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        620,
+        240
+      ],
+      "id": "code-003-e7b1a4c9",
+      "name": "API 01b - Build Services + Summary"
+    },
+    {
+      "parameters": {
+        "respondWith": "allIncomingItems",
+        "options": {
+          "responseCode": 200
+        }
+      },
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [
+        1020,
+        240
+      ],
+      "id": "resp-004-e7b1a4c9",
+      "name": "API 01c - Respond health-status",
+      "notes": "Returns { summary, services } - the dashboard's primary payload."
+    },
+    {
+      "parameters": {
+        "httpMethod": "get",
+        "path": "health-checks",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [
+        0,
+        480
+      ],
+      "id": "wh-005-e7b1a4c9",
+      "name": "API 02 - GET health-checks",
+      "webhookId": "vwo-qa-health-checks"
+    },
+    {
+      "parameters": {
+        "documentId": {
+          "__rl": true,
+          "mode": "list",
+          "value": "REPLACE_WITH_SPREADSHEET_ID"
+        },
+        "sheetName": {
+          "__rl": true,
+          "mode": "list",
+          "value": "Health_Check_History"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.5,
+      "position": [
+        260,
+        480
+      ],
+      "id": "gs-006-e7b1a4c9",
+      "name": "API 02a - Read Health Check History"
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "language": "javascript",
+        "jsCode": "const S = (v) => (v === undefined || v === null) ? '' : String(v).trim();\nconst NUM = (v) => { const n = Number(String(v === undefined || v === null ? '' : v).replace(/[^0-9.\\-]/g, '')); return Number.isFinite(n) ? n : 0; };\nconst pick = (row, keys, fallback) => { for (const k of keys) { const v = row[k]; if (v !== undefined && v !== null && String(v) !== '') return v; } return fallback === undefined ? '' : fallback; };\nconst STATUS_MAP = { UP: 'HEALTHY', HEALTHY: 'HEALTHY', DEGRADED: 'SLOW', SLOW: 'SLOW', DOWN: 'DOWN', FUNCTIONAL_FAILURE: 'FUNCTIONAL_FAILURE', RETRYING: 'RETRYING', UNKNOWN: 'UNKNOWN' };\nconst normStatus = (v) => STATUS_MAP[S(v).toUpperCase()] || 'UNKNOWN';\nconst isoTs = (v) => { const s = S(v); if (!s) return null; const m = s.match(/^(\\d{4})-(\\d{2})-(\\d{2})[ T](\\d{2}):(\\d{2}):(\\d{2})/); if (m) return new Date(m[1] + '-' + m[2] + '-' + m[3] + 'T' + m[4] + ':' + m[5] + ':' + m[6] + '+05:30').toISOString(); const d = new Date(s); return isNaN(d.getTime()) ? null : d.toISOString(); };\nconst slug = (v) => 'svc-' + S(v).toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '');\nconst env = (row) => S(pick(row, ['Environment', 'environment'], 'QA')) || 'QA';\nconst svcName = (row) => S(pick(row, ['Service Name', 'serviceName']));\nconst rows = () => $input.all().map((it) => it.json || {});\nconst MAX_ROWS = 1000;\nlet query = {};\ntry { query = ($('API 02 - GET health-checks').first().json || {}).query || {}; } catch (e) { query = {}; }\nconst envFilter = S(query.environment || query.env || '');\nconst idFilter = S(query.id || '');\n\nlet data = rows();\nif (envFilter) { data = data.filter((row) => env(row).toLowerCase() === envFilter.toLowerCase()); }\n\nconst out = data.map((row, index) => {\n  const status = normStatus(pick(row, ['Health Status', 'healthStatus']));\n  const retryCount = NUM(pick(row, ['Retry Count', 'retryCount'], 0));\n  const validation = S(pick(row, ['Functional Validation', 'validationResult'])).toUpperCase();\n  const errMsg = S(pick(row, ['Error Message', 'failureReason']));\n  const name = svcName(row);\n  return {\n    id: 'hc-' + (index + 1),\n    serviceId: slug(name),\n    serviceName: name,\n    environment: env(row),\n    attempt: retryCount + 1,\n    maxAttempts: 3,\n    status: status,\n    httpStatus: NUM(pick(row, ['HTTP Status', 'httpStatus'], 0)) || null,\n    responseTimeMs: NUM(pick(row, ['Response Time Ms', 'responseTimeMs'], 0)),\n    expectedTextFound: validation.indexOf('FAIL') === -1,\n    message: errMsg || (status === 'HEALTHY'\n      ? 'Check passed - HTTP status and functional assertions OK'\n      : 'Check completed with status ' + status),\n    checkedAt: isoTs(pick(row, ['Timestamp', 'timestamp'])),\n    n8nExecutionId: S(pick(row, ['Workflow Execution ID', 'runId'])),\n    failureReason: errMsg || undefined,\n  };\n});\n\nout.sort((a, b) => String(b.checkedAt || '').localeCompare(String(a.checkedAt || '')));\nreturn out.slice(0, MAX_ROWS).map((item) => ({ json: item }));"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        620,
+        480
+      ],
+      "id": "code-007-e7b1a4c9",
+      "name": "API 02b - Map Health Checks"
+    },
+    {
+      "parameters": {
+        "respondWith": "allIncomingItems",
+        "options": {
+          "responseCode": 200
+        }
+      },
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [
+        1020,
+        480
+      ],
+      "id": "resp-008-e7b1a4c9",
+      "name": "API 02c - Respond health-checks",
+      "notes": "HealthCheck[] - one item per recorded check."
+    },
+    {
+      "parameters": {
+        "httpMethod": "get",
+        "path": "logs",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [
+        0,
+        720
+      ],
+      "id": "wh-009-e7b1a4c9",
+      "name": "API 03 - GET logs",
+      "webhookId": "vwo-qa-logs"
+    },
+    {
+      "parameters": {
+        "documentId": {
+          "__rl": true,
+          "mode": "list",
+          "value": "REPLACE_WITH_SPREADSHEET_ID"
+        },
+        "sheetName": {
+          "__rl": true,
+          "mode": "list",
+          "value": "Health_Check_History"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.5,
+      "position": [
+        260,
+        720
+      ],
+      "id": "gs-010-e7b1a4c9",
+      "name": "API 03a - Read Health Check History"
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "language": "javascript",
+        "jsCode": "const S = (v) => (v === undefined || v === null) ? '' : String(v).trim();\nconst NUM = (v) => { const n = Number(String(v === undefined || v === null ? '' : v).replace(/[^0-9.\\-]/g, '')); return Number.isFinite(n) ? n : 0; };\nconst pick = (row, keys, fallback) => { for (const k of keys) { const v = row[k]; if (v !== undefined && v !== null && String(v) !== '') return v; } return fallback === undefined ? '' : fallback; };\nconst STATUS_MAP = { UP: 'HEALTHY', HEALTHY: 'HEALTHY', DEGRADED: 'SLOW', SLOW: 'SLOW', DOWN: 'DOWN', FUNCTIONAL_FAILURE: 'FUNCTIONAL_FAILURE', RETRYING: 'RETRYING', UNKNOWN: 'UNKNOWN' };\nconst normStatus = (v) => STATUS_MAP[S(v).toUpperCase()] || 'UNKNOWN';\nconst isoTs = (v) => { const s = S(v); if (!s) return null; const m = s.match(/^(\\d{4})-(\\d{2})-(\\d{2})[ T](\\d{2}):(\\d{2}):(\\d{2})/); if (m) return new Date(m[1] + '-' + m[2] + '-' + m[3] + 'T' + m[4] + ':' + m[5] + ':' + m[6] + '+05:30').toISOString(); const d = new Date(s); return isNaN(d.getTime()) ? null : d.toISOString(); };\nconst slug = (v) => 'svc-' + S(v).toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '');\nconst env = (row) => S(pick(row, ['Environment', 'environment'], 'QA')) || 'QA';\nconst svcName = (row) => S(pick(row, ['Service Name', 'serviceName']));\nconst rows = () => $input.all().map((it) => it.json || {});\nconst MAX_ROWS = 1000;\nlet query = {};\ntry { query = ($('API 03 - GET logs').first().json || {}).query || {}; } catch (e) { query = {}; }\nconst envFilter = S(query.environment || query.env || '');\nconst idFilter = S(query.id || '');\n\nlet data = rows();\nif (envFilter) { data = data.filter((row) => env(row).toLowerCase() === envFilter.toLowerCase()); }\n\nconst out = data.map((row, index) => {\n  const status = normStatus(pick(row, ['Health Status', 'healthStatus']));\n  const retryCount = NUM(pick(row, ['Retry Count', 'retryCount'], 0));\n  const errMsg = S(pick(row, ['Error Message', 'failureReason']));\n  const name = svcName(row);\n  return {\n    id: 'log-' + (index + 1),\n    timestamp: isoTs(pick(row, ['Timestamp', 'timestamp'])),\n    serviceId: slug(name),\n    serviceName: name,\n    environment: env(row),\n    attempt: retryCount + 1,\n    maxAttempts: 3,\n    status: status,\n    httpCode: NUM(pick(row, ['HTTP Status', 'httpStatus'], 0)) || null,\n    responseTimeMs: NUM(pick(row, ['Response Time Ms', 'responseTimeMs'], 0)),\n    message: errMsg || 'HTTP ' + (NUM(pick(row, ['HTTP Status'], 0)) || 'n/a') + ' in ' + NUM(pick(row, ['Response Time Ms'], 0)) + ' ms',\n  };\n});\n\nout.sort((a, b) => String(b.timestamp || '').localeCompare(String(a.timestamp || '')));\nreturn out.slice(0, MAX_ROWS).map((item) => ({ json: item }));"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        620,
+        720
+      ],
+      "id": "code-011-e7b1a4c9",
+      "name": "API 03b - Map Log Entries"
+    },
+    {
+      "parameters": {
+        "respondWith": "allIncomingItems",
+        "options": {
+          "responseCode": 200
+        }
+      },
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [
+        1020,
+        720
+      ],
+      "id": "resp-012-e7b1a4c9",
+      "name": "API 03c - Respond logs",
+      "notes": "LogEntry[] - flattened check log."
+    },
+    {
+      "parameters": {
+        "httpMethod": "get",
+        "path": "response-times",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [
+        0,
+        960
+      ],
+      "id": "wh-013-e7b1a4c9",
+      "name": "API 04 - GET response-times",
+      "webhookId": "vwo-qa-response-times"
+    },
+    {
+      "parameters": {
+        "documentId": {
+          "__rl": true,
+          "mode": "list",
+          "value": "REPLACE_WITH_SPREADSHEET_ID"
+        },
+        "sheetName": {
+          "__rl": true,
+          "mode": "list",
+          "value": "Health_Check_History"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.5,
+      "position": [
+        260,
+        960
+      ],
+      "id": "gs-014-e7b1a4c9",
+      "name": "API 04a - Read Health Check History"
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "language": "javascript",
+        "jsCode": "const S = (v) => (v === undefined || v === null) ? '' : String(v).trim();\nconst NUM = (v) => { const n = Number(String(v === undefined || v === null ? '' : v).replace(/[^0-9.\\-]/g, '')); return Number.isFinite(n) ? n : 0; };\nconst pick = (row, keys, fallback) => { for (const k of keys) { const v = row[k]; if (v !== undefined && v !== null && String(v) !== '') return v; } return fallback === undefined ? '' : fallback; };\nconst STATUS_MAP = { UP: 'HEALTHY', HEALTHY: 'HEALTHY', DEGRADED: 'SLOW', SLOW: 'SLOW', DOWN: 'DOWN', FUNCTIONAL_FAILURE: 'FUNCTIONAL_FAILURE', RETRYING: 'RETRYING', UNKNOWN: 'UNKNOWN' };\nconst normStatus = (v) => STATUS_MAP[S(v).toUpperCase()] || 'UNKNOWN';\nconst isoTs = (v) => { const s = S(v); if (!s) return null; const m = s.match(/^(\\d{4})-(\\d{2})-(\\d{2})[ T](\\d{2}):(\\d{2}):(\\d{2})/); if (m) return new Date(m[1] + '-' + m[2] + '-' + m[3] + 'T' + m[4] + ':' + m[5] + ':' + m[6] + '+05:30').toISOString(); const d = new Date(s); return isNaN(d.getTime()) ? null : d.toISOString(); };\nconst slug = (v) => 'svc-' + S(v).toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '');\nconst env = (row) => S(pick(row, ['Environment', 'environment'], 'QA')) || 'QA';\nconst svcName = (row) => S(pick(row, ['Service Name', 'serviceName']));\nconst rows = () => $input.all().map((it) => it.json || {});\nconst MAX_ROWS = 1000;\nlet query = {};\ntry { query = ($('API 04 - GET response-times').first().json || {}).query || {}; } catch (e) { query = {}; }\nconst envFilter = S(query.environment || query.env || '');\nconst idFilter = S(query.id || '');\n\nlet data = rows();\nif (envFilter) { data = data.filter((row) => env(row).toLowerCase() === envFilter.toLowerCase()); }\n\nconst out = data.map((row) => {\n  const name = svcName(row);\n  return {\n    timestamp: isoTs(pick(row, ['Timestamp', 'timestamp'])),\n    serviceId: slug(name),\n    serviceName: name,\n    responseTimeMs: NUM(pick(row, ['Response Time Ms', 'responseTimeMs'], 0)),\n    thresholdMs: NUM(pick(row, ['Response Time Threshold Ms'], 3000)) || 3000,\n  };\n});\n\nout.sort((a, b) => String(a.timestamp || '').localeCompare(String(b.timestamp || '')));\nreturn out.slice(-MAX_ROWS).map((item) => ({ json: item }));"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        620,
+        960
+      ],
+      "id": "code-015-e7b1a4c9",
+      "name": "API 04b - Map Response Times"
+    },
+    {
+      "parameters": {
+        "respondWith": "allIncomingItems",
+        "options": {
+          "responseCode": 200
+        }
+      },
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [
+        1020,
+        960
+      ],
+      "id": "resp-016-e7b1a4c9",
+      "name": "API 04c - Respond response-times",
+      "notes": "ResponseTimeMetric[] - 24h latency series."
+    },
+    {
+      "parameters": {
+        "httpMethod": "get",
+        "path": "uptime",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [
+        0,
+        1200
+      ],
+      "id": "wh-017-e7b1a4c9",
+      "name": "API 05 - GET uptime",
+      "webhookId": "vwo-qa-uptime"
+    },
+    {
+      "parameters": {
+        "documentId": {
+          "__rl": true,
+          "mode": "list",
+          "value": "REPLACE_WITH_SPREADSHEET_ID"
+        },
+        "sheetName": {
+          "__rl": true,
+          "mode": "list",
+          "value": "Daily_Availability"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.5,
+      "position": [
+        260,
+        1200
+      ],
+      "id": "gs-018-e7b1a4c9",
+      "name": "API 05a - Read Daily Availability"
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "language": "javascript",
+        "jsCode": "const S = (v) => (v === undefined || v === null) ? '' : String(v).trim();\nconst NUM = (v) => { const n = Number(String(v === undefined || v === null ? '' : v).replace(/[^0-9.\\-]/g, '')); return Number.isFinite(n) ? n : 0; };\nconst pick = (row, keys, fallback) => { for (const k of keys) { const v = row[k]; if (v !== undefined && v !== null && String(v) !== '') return v; } return fallback === undefined ? '' : fallback; };\nconst STATUS_MAP = { UP: 'HEALTHY', HEALTHY: 'HEALTHY', DEGRADED: 'SLOW', SLOW: 'SLOW', DOWN: 'DOWN', FUNCTIONAL_FAILURE: 'FUNCTIONAL_FAILURE', RETRYING: 'RETRYING', UNKNOWN: 'UNKNOWN' };\nconst normStatus = (v) => STATUS_MAP[S(v).toUpperCase()] || 'UNKNOWN';\nconst isoTs = (v) => { const s = S(v); if (!s) return null; const m = s.match(/^(\\d{4})-(\\d{2})-(\\d{2})[ T](\\d{2}):(\\d{2}):(\\d{2})/); if (m) return new Date(m[1] + '-' + m[2] + '-' + m[3] + 'T' + m[4] + ':' + m[5] + ':' + m[6] + '+05:30').toISOString(); const d = new Date(s); return isNaN(d.getTime()) ? null : d.toISOString(); };\nconst slug = (v) => 'svc-' + S(v).toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '');\nconst env = (row) => S(pick(row, ['Environment', 'environment'], 'QA')) || 'QA';\nconst svcName = (row) => S(pick(row, ['Service Name', 'serviceName']));\nconst rows = () => $input.all().map((it) => it.json || {});\nconst MAX_ROWS = 1000;\nlet query = {};\ntry { query = ($('API 05 - GET uptime').first().json || {}).query || {}; } catch (e) { query = {}; }\nconst envFilter = S(query.environment || query.env || '');\nconst idFilter = S(query.id || '');\n\nlet data = rows();\nif (envFilter) { data = data.filter((row) => env(row).toLowerCase() === envFilter.toLowerCase()); }\n\n// Node \"24 - Aggregate Overall VWO Health\" also appends an OVERALL / ALL_SERVICES row.\nconst overall = data.filter((row) => {\n  const service = S(pick(row, ['Service Name', 'serviceName'])).toUpperCase();\n  const environment = env(row).toUpperCase();\n  return service === 'ALL_SERVICES' || environment === 'OVERALL';\n});\nconst source = overall.length > 0 ? overall : data;\n\nconst out = source.map((row) => ({\n  date: S(pick(row, ['Date', 'date'])).slice(0, 10),\n  uptimePct: NUM(pick(row, ['Availability Percentage', 'availabilityPct'], 0)),\n  checks: NUM(pick(row, ['Total Checks', 'totalChecks'], 0)),\n  failedChecks: NUM(pick(row, ['Failed Checks', 'failedChecks'], 0)),\n}));\n\nreturn out.slice(-31).map((item) => ({ json: item }));"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        620,
+        1200
+      ],
+      "id": "code-019-e7b1a4c9",
+      "name": "API 05b - Map Uptime"
+    },
+    {
+      "parameters": {
+        "respondWith": "allIncomingItems",
+        "options": {
+          "responseCode": 200
+        }
+      },
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [
+        1020,
+        1200
+      ],
+      "id": "resp-020-e7b1a4c9",
+      "name": "API 05c - Respond uptime",
+      "notes": "UptimePoint[] - daily availability (OVERALL / ALL_SERVICES rows)."
+    },
+    {
+      "parameters": {
+        "httpMethod": "get",
+        "path": "incidents",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [
+        0,
+        1440
+      ],
+      "id": "wh-021-e7b1a4c9",
+      "name": "API 06 - GET incidents",
+      "webhookId": "vwo-qa-incidents"
+    },
+    {
+      "parameters": {
+        "documentId": {
+          "__rl": true,
+          "mode": "list",
+          "value": "REPLACE_WITH_SPREADSHEET_ID"
+        },
+        "sheetName": {
+          "__rl": true,
+          "mode": "list",
+          "value": "Downtime_Incidents"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.5,
+      "position": [
+        260,
+        1440
+      ],
+      "id": "gs-022-e7b1a4c9",
+      "name": "API 06a - Read Downtime Incidents"
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "language": "javascript",
+        "jsCode": "const S = (v) => (v === undefined || v === null) ? '' : String(v).trim();\nconst NUM = (v) => { const n = Number(String(v === undefined || v === null ? '' : v).replace(/[^0-9.\\-]/g, '')); return Number.isFinite(n) ? n : 0; };\nconst pick = (row, keys, fallback) => { for (const k of keys) { const v = row[k]; if (v !== undefined && v !== null && String(v) !== '') return v; } return fallback === undefined ? '' : fallback; };\nconst STATUS_MAP = { UP: 'HEALTHY', HEALTHY: 'HEALTHY', DEGRADED: 'SLOW', SLOW: 'SLOW', DOWN: 'DOWN', FUNCTIONAL_FAILURE: 'FUNCTIONAL_FAILURE', RETRYING: 'RETRYING', UNKNOWN: 'UNKNOWN' };\nconst normStatus = (v) => STATUS_MAP[S(v).toUpperCase()] || 'UNKNOWN';\nconst isoTs = (v) => { const s = S(v); if (!s) return null; const m = s.match(/^(\\d{4})-(\\d{2})-(\\d{2})[ T](\\d{2}):(\\d{2}):(\\d{2})/); if (m) return new Date(m[1] + '-' + m[2] + '-' + m[3] + 'T' + m[4] + ':' + m[5] + ':' + m[6] + '+05:30').toISOString(); const d = new Date(s); return isNaN(d.getTime()) ? null : d.toISOString(); };\nconst slug = (v) => 'svc-' + S(v).toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '');\nconst env = (row) => S(pick(row, ['Environment', 'environment'], 'QA')) || 'QA';\nconst svcName = (row) => S(pick(row, ['Service Name', 'serviceName']));\nconst rows = () => $input.all().map((it) => it.json || {});\nconst MAX_ROWS = 1000;\nlet query = {};\ntry { query = ($('API 06 - GET incidents').first().json || {}).query || {}; } catch (e) { query = {}; }\nconst envFilter = S(query.environment || query.env || '');\nconst idFilter = S(query.id || '');\n\nconst SEVERITY_MAP = { 'SEV-1': 'Critical', 'SEV-2': 'High', 'SEV-3': 'Medium', 'SEV-4': 'Low', CRITICAL: 'Critical', HIGH: 'High', MEDIUM: 'Medium', LOW: 'Low' };\nconst INCIDENT_STATUS_MAP = { OPEN: 'Open', INVESTIGATING: 'Investigating', RECOVERED: 'Recovered', RESOLVED: 'Resolved', CLOSED: 'Resolved' };\n\n// Timeline is derived: Downtime_Incidents stores the run outcome, not each retry.\nconst buildTimeline = (incidentId, serviceName, startedAt, recoveredAt, failureReason, retryAttempts, httpStatus, responseTimeMs) => {\n  const events = [];\n  const base = startedAt ? new Date(startedAt).getTime() : Date.now();\n  const at = (offsetSeconds) => new Date(base + offsetSeconds * 1000).toISOString();\n  const delays = [20, 30];\n  let cursor = 0;\n  events.push({ id: incidentId + '-t1', label: 'Initial health check failed', detail: 'HTTP ' + (httpStatus || 'n/a') + ' - ' + failureReason, at: at(0), kind: 'failure' });\n  for (let i = 0; i < Math.max(0, retryAttempts - 1); i += 1) {\n    const wait = delays[i] === undefined ? 30 : delays[i];\n    events.push({ id: incidentId + '-t' + (i + 2), label: 'Retry #' + (i + 1) + ' scheduled', detail: 'Wait: ' + wait + ' seconds', at: at(cursor + 1), kind: 'schedule' });\n    cursor = cursor + 1 + wait;\n    events.push({ id: incidentId + '-t' + (i + 2) + 'f', label: 'Retry #' + (i + 1) + ' failed', detail: 'HTTP ' + (httpStatus || 'n/a') + ' - ' + (responseTimeMs || 0) + ' ms', at: at(cursor - 1), kind: 'retry' });\n  }\n  events.push({ id: incidentId + '-tc', label: 'Incident created', detail: incidentId + ' opened for ' + serviceName, at: at(cursor), kind: 'incident' });\n  if (recoveredAt) {\n    events.push({ id: incidentId + '-tr', label: 'Service recovered', detail: 'Availability restored', at: recoveredAt, kind: 'recovery' });\n  }\n  return events;\n};\n\nlet data = rows();\nif (envFilter) { data = data.filter((row) => env(row).toLowerCase() === envFilter.toLowerCase()); }\nif (idFilter) { data = data.filter((row) => S(pick(row, ['Incident ID', 'incidentId'])).toLowerCase() === idFilter.toLowerCase()); }\n\nconst out = data.map((row) => {\n  const incidentId = S(pick(row, ['Incident ID', 'incidentId']));\n  const name = svcName(row);\n  const startedAt = isoTs(pick(row, ['Downtime Start', 'Detected At', 'Timestamp', 'downtimeStart']));\n  const recoveredAt = isoTs(pick(row, ['Recovery Time', 'recoveryTime']));\n  const status = INCIDENT_STATUS_MAP[S(pick(row, ['Status'], 'OPEN')).toUpperCase()] || 'Open';\n  const httpStatus = NUM(pick(row, ['HTTP Status', 'httpStatus'], 0)) || null;\n  const responseTimeMs = NUM(pick(row, ['Response Time Ms', 'responseTimeMs'], 0));\n  const retryAttempts = NUM(pick(row, ['Retry Count', 'Attempt Count'], status === 'Open' ? 3 : 2)) || 1;\n  const storedSeconds = NUM(pick(row, ['Downtime Seconds', 'downtimeSeconds'], 0));\n  const computedSeconds = startedAt ? Math.max(0, Math.round(((recoveredAt ? new Date(recoveredAt).getTime() : Date.now()) - new Date(startedAt).getTime()) / 1000)) : 0;\n  const failureReason = S(pick(row, ['Failure Reason', 'failureReason'], 'Health check failed'));\n  return {\n    id: incidentId,\n    serviceId: slug(name),\n    serviceName: name,\n    application: S(pick(row, ['Application'], 'VWO')) || 'VWO',\n    environment: env(row),\n    status: status,\n    severity: SEVERITY_MAP[S(pick(row, ['Severity'], 'SEV-3')).toUpperCase()] || 'Medium',\n    detectedAt: startedAt,\n    startedAt: startedAt,\n    recoveredAt: recoveredAt,\n    durationSeconds: storedSeconds || computedSeconds,\n    retryAttempts: retryAttempts,\n    failureReason: failureReason,\n    httpResponse: S(pick(row, ['HTTP Response', 'Response Snippet'], 'HTTP ' + (httpStatus || 'n/a') + ' for ' + S(pick(row, ['Endpoint', 'url'])))),\n    n8nExecutionId: S(pick(row, ['Workflow Execution ID', 'runId', 'Execution ID'])),\n    timeline: buildTimeline(incidentId, name, startedAt, recoveredAt, failureReason, retryAttempts, httpStatus, responseTimeMs),\n  };\n});\n\nout.sort((a, b) => String(b.detectedAt || '').localeCompare(String(a.detectedAt || '')));\nreturn out.slice(0, MAX_ROWS).map((item) => ({ json: item }));"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        620,
+        1440
+      ],
+      "id": "code-023-e7b1a4c9",
+      "name": "API 06b - Map Incidents"
+    },
+    {
+      "parameters": {
+        "respondWith": "allIncomingItems",
+        "options": {
+          "responseCode": 200
+        }
+      },
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [
+        1020,
+        1440
+      ],
+      "id": "resp-024-e7b1a4c9",
+      "name": "API 06c - Respond incidents",
+      "notes": "Incident[] - supports ?id=INC-... and ?environment=QA."
+    },
+    {
+      "parameters": {
+        "httpMethod": "get",
+        "path": "retry-history",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [
+        0,
+        1680
+      ],
+      "id": "wh-025-e7b1a4c9",
+      "name": "API 07 - GET retry-history",
+      "webhookId": "vwo-qa-retry-history"
+    },
+    {
+      "parameters": {
+        "documentId": {
+          "__rl": true,
+          "mode": "list",
+          "value": "REPLACE_WITH_SPREADSHEET_ID"
+        },
+        "sheetName": {
+          "__rl": true,
+          "mode": "list",
+          "value": "Downtime_Incidents"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.5,
+      "position": [
+        260,
+        1680
+      ],
+      "id": "gs-026-e7b1a4c9",
+      "name": "API 07a - Read Downtime Incidents"
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "language": "javascript",
+        "jsCode": "const S = (v) => (v === undefined || v === null) ? '' : String(v).trim();\nconst NUM = (v) => { const n = Number(String(v === undefined || v === null ? '' : v).replace(/[^0-9.\\-]/g, '')); return Number.isFinite(n) ? n : 0; };\nconst pick = (row, keys, fallback) => { for (const k of keys) { const v = row[k]; if (v !== undefined && v !== null && String(v) !== '') return v; } return fallback === undefined ? '' : fallback; };\nconst STATUS_MAP = { UP: 'HEALTHY', HEALTHY: 'HEALTHY', DEGRADED: 'SLOW', SLOW: 'SLOW', DOWN: 'DOWN', FUNCTIONAL_FAILURE: 'FUNCTIONAL_FAILURE', RETRYING: 'RETRYING', UNKNOWN: 'UNKNOWN' };\nconst normStatus = (v) => STATUS_MAP[S(v).toUpperCase()] || 'UNKNOWN';\nconst isoTs = (v) => { const s = S(v); if (!s) return null; const m = s.match(/^(\\d{4})-(\\d{2})-(\\d{2})[ T](\\d{2}):(\\d{2}):(\\d{2})/); if (m) return new Date(m[1] + '-' + m[2] + '-' + m[3] + 'T' + m[4] + ':' + m[5] + ':' + m[6] + '+05:30').toISOString(); const d = new Date(s); return isNaN(d.getTime()) ? null : d.toISOString(); };\nconst slug = (v) => 'svc-' + S(v).toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '');\nconst env = (row) => S(pick(row, ['Environment', 'environment'], 'QA')) || 'QA';\nconst svcName = (row) => S(pick(row, ['Service Name', 'serviceName']));\nconst rows = () => $input.all().map((it) => it.json || {});\nconst MAX_ROWS = 1000;\nlet query = {};\ntry { query = ($('API 07 - GET retry-history').first().json || {}).query || {}; } catch (e) { query = {}; }\nconst envFilter = S(query.environment || query.env || '');\nconst idFilter = S(query.id || '');\n\nlet data = rows();\nif (envFilter) { data = data.filter((row) => env(row).toLowerCase() === envFilter.toLowerCase()); }\n\n// Retry attempts are NOT persisted individually - derive them from each incident\n// using the workflow's fixed policy (3 attempts, 20 s then 30 s waits).\nconst out = [];\nfor (const row of data) {\n  const incidentId = S(pick(row, ['Incident ID', 'incidentId']));\n  const name = svcName(row);\n  const startedAt = isoTs(pick(row, ['Downtime Start', 'Detected At', 'Timestamp']));\n  const recoveredAt = isoTs(pick(row, ['Recovery Time', 'recoveryTime']));\n  const status = S(pick(row, ['Status'], 'OPEN')).toUpperCase();\n  const httpStatus = NUM(pick(row, ['HTTP Status'], 0)) || null;\n  const base = startedAt ? new Date(startedAt).getTime() : Date.now();\n  const at = (seconds) => new Date(base + seconds * 1000).toISOString();\n  const delays = [20, 30];\n  out.push({ id: incidentId + '-r0', serviceId: slug(name), serviceName: name, incidentId: incidentId, attempt: 1, outcome: 'failed', at: at(0), message: 'Initial health check failed - HTTP ' + (httpStatus || 'n/a') });\n  let cursor = 0;\n  for (let i = 0; i < delays.length; i += 1) {\n    out.push({ id: incidentId + '-r' + (i + 1) + 's', serviceId: slug(name), serviceName: name, incidentId: incidentId, attempt: i + 2, outcome: 'scheduled', scheduledDelaySeconds: delays[i], at: at(cursor + 1), message: 'Retry #' + (i + 1) + ' scheduled' });\n    cursor = cursor + 1 + delays[i];\n    const recovered = recoveredAt && new Date(recoveredAt).getTime() <= base + cursor * 1000;\n    out.push({ id: incidentId + '-r' + (i + 1), serviceId: slug(name), serviceName: name, incidentId: incidentId, attempt: i + 2, outcome: recovered ? 'succeeded' : 'failed', at: at(cursor - 1), message: recovered ? 'Retry #' + (i + 1) + ' succeeded - service recovered' : 'Retry #' + (i + 1) + ' failed - retries exhausted' });\n    if (recovered) break;\n  }\n  if (status === 'RESOLVED' || status === 'RECOVERED') {\n    out.push({ id: incidentId + '-rc', serviceId: slug(name), serviceName: name, incidentId: incidentId, attempt: 1, outcome: 'info', at: recoveredAt || at(cursor), message: incidentId + ' marked ' + status.toLowerCase() });\n  } else {\n    out.push({ id: incidentId + '-rc', serviceId: slug(name), serviceName: name, incidentId: incidentId, attempt: 1, outcome: 'info', at: at(cursor), message: incidentId + ' created' });\n  }\n}\n\nout.sort((a, b) => String(b.at || '').localeCompare(String(a.at || '')));\nreturn out.slice(0, MAX_ROWS).map((item) => ({ json: item }));"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        620,
+        1680
+      ],
+      "id": "code-027-e7b1a4c9",
+      "name": "API 07b - Derive Retry Attempts"
+    },
+    {
+      "parameters": {
+        "respondWith": "allIncomingItems",
+        "options": {
+          "responseCode": 200
+        }
+      },
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [
+        1020,
+        1680
+      ],
+      "id": "resp-028-e7b1a4c9",
+      "name": "API 07c - Respond retry-history",
+      "notes": "RetryAttempt[] - derived from incident rows using the 20s/30s policy."
+    },
+    {
+      "parameters": {
+        "httpMethod": "post",
+        "path": "health-check",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [
+        0,
+        1920
+      ],
+      "id": "wh-029-e7b1a4c9",
+      "name": "API 08 - POST health-check",
+      "webhookId": "vwo-qa-health-check"
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "language": "javascript",
+        "jsCode": "let body = {};\ntry { body = $('API 08 - POST health-check').first().json.body || {}; } catch (e) { body = {}; }\nconst S = (v) => (v === undefined || v === null) ? '' : String(v).trim();\nconst environment = S(body.environment) || 'QA';\nlet executionId = '';\ntry { executionId = 'exec-' + $execution.id; } catch (e) { executionId = 'exec-' + Date.now(); }\nreturn [{ json: {\n  ok: true,\n  triggeredAt: new Date().toISOString(),\n  environment: environment,\n  executionId: executionId,\n  services: [],\n  message: 'Health check queued. The monitoring workflow has been triggered; refresh in a few seconds for the new results.',\n} }];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        620,
+        1920
+      ],
+      "id": "code-030-e7b1a4c9",
+      "name": "API 08a - Acknowledge Health Check"
+    },
+    {
+      "parameters": {
+        "respondWith": "allIncomingItems",
+        "options": {
+          "responseCode": 200
+        }
+      },
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [
+        1020,
+        1920
+      ],
+      "id": "resp-031-e7b1a4c9",
+      "name": "API 08b - Respond health-check",
+      "notes": "Answers immediately, then triggers the monitor workflow."
+    },
+    {
+      "parameters": {
+        "workflowId": {
+          "__rl": true,
+          "mode": "list",
+          "value": "REPLACE_WITH_MONITOR_WORKFLOW_ID"
+        },
+        "workflowMode": "list",
+        "options": {
+          "waitForSubWorkflow": false
+        }
+      },
+      "type": "n8n-nodes-base.executeWorkflow",
+      "typeVersion": 1.2,
+      "position": [
+        1280,
+        1920
+      ],
+      "id": "exec-032-e7b1a4c9",
+      "name": "API 08c - Run Monitoring Workflow"
+    },
+    {
+      "parameters": {
+        "httpMethod": "get",
+        "path": "settings",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [
+        0,
+        2160
+      ],
+      "id": "wh-033-e7b1a4c9",
+      "name": "API 09 - GET settings",
+      "webhookId": "vwo-qa-settings-get"
+    },
+    {
+      "parameters": {
+        "documentId": {
+          "__rl": true,
+          "mode": "list",
+          "value": "REPLACE_WITH_SPREADSHEET_ID"
+        },
+        "sheetName": {
+          "__rl": true,
+          "mode": "list",
+          "value": "Settings"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.5,
+      "position": [
+        260,
+        2160
+      ],
+      "id": "gs-034-e7b1a4c9",
+      "name": "API 09a - Read Settings Sheet",
+      "onError": "continueRegularOutput",
+      "alwaysOutputData": true
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "language": "javascript",
+        "jsCode": "const S = (v) => (v === undefined || v === null) ? '' : String(v).trim();\nconst NUM = (v) => { const n = Number(String(v === undefined || v === null ? '' : v).replace(/[^0-9.\\-]/g, '')); return Number.isFinite(n) ? n : 0; };\nconst pick = (row, keys, fallback) => { for (const k of keys) { const v = row[k]; if (v !== undefined && v !== null && String(v) !== '') return v; } return fallback === undefined ? '' : fallback; };\nconst STATUS_MAP = { UP: 'HEALTHY', HEALTHY: 'HEALTHY', DEGRADED: 'SLOW', SLOW: 'SLOW', DOWN: 'DOWN', FUNCTIONAL_FAILURE: 'FUNCTIONAL_FAILURE', RETRYING: 'RETRYING', UNKNOWN: 'UNKNOWN' };\nconst normStatus = (v) => STATUS_MAP[S(v).toUpperCase()] || 'UNKNOWN';\nconst isoTs = (v) => { const s = S(v); if (!s) return null; const m = s.match(/^(\\d{4})-(\\d{2})-(\\d{2})[ T](\\d{2}):(\\d{2}):(\\d{2})/); if (m) return new Date(m[1] + '-' + m[2] + '-' + m[3] + 'T' + m[4] + ':' + m[5] + ':' + m[6] + '+05:30').toISOString(); const d = new Date(s); return isNaN(d.getTime()) ? null : d.toISOString(); };\nconst slug = (v) => 'svc-' + S(v).toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '');\nconst env = (row) => S(pick(row, ['Environment', 'environment'], 'QA')) || 'QA';\nconst svcName = (row) => S(pick(row, ['Service Name', 'serviceName']));\nconst rows = () => $input.all().map((it) => it.json || {});\nconst MAX_ROWS = 1000;\n\nconst data = rows();\nconst defaults = {\n  responseTimeThresholdMs: 3000,\n  retryAttempts: 3,\n  retryDelaysSeconds: [20, 30],\n  checkIntervalMinutes: 5,\n  environments: [\n    { environment: 'QA', baseUrl: 'https://app.vwo.com', enabled: true, criticality: 'Critical' },\n    { environment: 'Staging', baseUrl: 'https://staging.vwo.com', enabled: false, criticality: 'High' },\n    { environment: 'Production', baseUrl: 'https://app.vwo.com', enabled: false, criticality: 'Critical' },\n  ],\n};\n\n// Optional `Settings` sheet with Key / Value columns overrides the defaults.\nconst map = {};\nfor (const row of data) {\n  const key = S(pick(row, ['Key', 'key']));\n  if (key) map[key] = pick(row, ['Value', 'value']);\n}\n\nconst settings = JSON.parse(JSON.stringify(defaults));\nif (map.responseTimeThresholdMs) settings.responseTimeThresholdMs = NUM(map.responseTimeThresholdMs);\nif (map.retryAttempts) settings.retryAttempts = NUM(map.retryAttempts);\nif (map.retryDelaysSeconds) settings.retryDelaysSeconds = S(map.retryDelaysSeconds).split(',').map(NUM).filter((n) => n > 0);\nif (map.checkIntervalMinutes) settings.checkIntervalMinutes = NUM(map.checkIntervalMinutes);\n\nreturn [{ json: settings }];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        620,
+        2160
+      ],
+      "id": "code-035-e7b1a4c9",
+      "name": "API 09b - Build Settings"
+    },
+    {
+      "parameters": {
+        "respondWith": "allIncomingItems",
+        "options": {
+          "responseCode": 200
+        }
+      },
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [
+        1020,
+        2160
+      ],
+      "id": "resp-036-e7b1a4c9",
+      "name": "API 09c - Respond settings",
+      "notes": "DashboardSettings - falls back to documented defaults when the Settings sheet is missing or empty."
+    },
+    {
+      "parameters": {
+        "httpMethod": "post",
+        "path": "settings-write",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [
+        0,
+        2400
+      ],
+      "id": "wh-037-e7b1a4c9",
+      "name": "API 10 - POST settings",
+      "webhookId": "vwo-qa-settings-post"
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "language": "javascript",
+        "jsCode": "const S = (v) => (v === undefined || v === null) ? '' : String(v).trim();\nconst NUM = (v) => { const n = Number(String(v === undefined || v === null ? '' : v).replace(/[^0-9.\\-]/g, '')); return Number.isFinite(n) ? n : 0; };\nconst pick = (row, keys, fallback) => { for (const k of keys) { const v = row[k]; if (v !== undefined && v !== null && String(v) !== '') return v; } return fallback === undefined ? '' : fallback; };\nconst STATUS_MAP = { UP: 'HEALTHY', HEALTHY: 'HEALTHY', DEGRADED: 'SLOW', SLOW: 'SLOW', DOWN: 'DOWN', FUNCTIONAL_FAILURE: 'FUNCTIONAL_FAILURE', RETRYING: 'RETRYING', UNKNOWN: 'UNKNOWN' };\nconst normStatus = (v) => STATUS_MAP[S(v).toUpperCase()] || 'UNKNOWN';\nconst isoTs = (v) => { const s = S(v); if (!s) return null; const m = s.match(/^(\\d{4})-(\\d{2})-(\\d{2})[ T](\\d{2}):(\\d{2}):(\\d{2})/); if (m) return new Date(m[1] + '-' + m[2] + '-' + m[3] + 'T' + m[4] + ':' + m[5] + ':' + m[6] + '+05:30').toISOString(); const d = new Date(s); return isNaN(d.getTime()) ? null : d.toISOString(); };\nconst slug = (v) => 'svc-' + S(v).toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '');\nconst env = (row) => S(pick(row, ['Environment', 'environment'], 'QA')) || 'QA';\nconst svcName = (row) => S(pick(row, ['Service Name', 'serviceName']));\nconst rows = () => $input.all().map((it) => it.json || {});\nconst MAX_ROWS = 1000;\n// Normalises the POSTed settings into Key / Value rows for the `Settings` sheet.\nlet body = {};\ntry { body = $('API 09 - POST settings').first().json.body || {}; } catch (e) { body = {}; }\nconst rowsOut = [\n  { Key: 'responseTimeThresholdMs', Value: String(NUM(body.responseTimeThresholdMs) || 3000) },\n  { Key: 'retryAttempts', Value: String(NUM(body.retryAttempts) || 3) },\n  { Key: 'retryDelaysSeconds', Value: (body.retryDelaysSeconds || [20, 30]).join(',') },\n  { Key: 'checkIntervalMinutes', Value: String(NUM(body.checkIntervalMinutes) || 5) },\n  { Key: 'updatedAt', Value: new Date().toISOString() },\n];\nreturn rowsOut.map((row) => ({ json: row }));"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        620,
+        2400
+      ],
+      "id": "code-038-e7b1a4c9",
+      "name": "API 10a - Normalise Settings Rows"
+    },
+    {
+      "parameters": {
+        "operation": "appendOrUpdate",
+        "documentId": {
+          "__rl": true,
+          "mode": "list",
+          "value": "REPLACE_WITH_SPREADSHEET_ID"
+        },
+        "sheetName": {
+          "__rl": true,
+          "mode": "list",
+          "value": "Settings"
+        },
+        "columns": {
+          "mappingMode": "autoMapInputData",
+          "value": {},
+          "matchingColumns": [
+            "Key"
+          ],
+          "schema": []
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.5,
+      "position": [
+        1020,
+        2400
+      ],
+      "id": "gs-039-e7b1a4c9",
+      "name": "API 10b - Upsert Settings"
+    },
+    {
+      "parameters": {
+        "respondWith": "allIncomingItems",
+        "options": {
+          "responseCode": 200
+        }
+      },
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [
+        1280,
+        2400
+      ],
+      "id": "resp-040-e7b1a4c9",
+      "name": "API 10c - Respond settings-write",
+      "notes": "Persists Key/Value settings rows."
+    },
+    {
+      "parameters": {
+        "httpMethod": "post",
+        "path": "incidents-resolve",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [
+        0,
+        2640
+      ],
+      "id": "wh-041-e7b1a4c9",
+      "name": "API 11 - POST incidents-resolve",
+      "webhookId": "vwo-qa-incidents-resolve"
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "language": "javascript",
+        "jsCode": "const S = (v) => (v === undefined || v === null) ? '' : String(v).trim();\nconst NUM = (v) => { const n = Number(String(v === undefined || v === null ? '' : v).replace(/[^0-9.\\-]/g, '')); return Number.isFinite(n) ? n : 0; };\nconst pick = (row, keys, fallback) => { for (const k of keys) { const v = row[k]; if (v !== undefined && v !== null && String(v) !== '') return v; } return fallback === undefined ? '' : fallback; };\nconst STATUS_MAP = { UP: 'HEALTHY', HEALTHY: 'HEALTHY', DEGRADED: 'SLOW', SLOW: 'SLOW', DOWN: 'DOWN', FUNCTIONAL_FAILURE: 'FUNCTIONAL_FAILURE', RETRYING: 'RETRYING', UNKNOWN: 'UNKNOWN' };\nconst normStatus = (v) => STATUS_MAP[S(v).toUpperCase()] || 'UNKNOWN';\nconst isoTs = (v) => { const s = S(v); if (!s) return null; const m = s.match(/^(\\d{4})-(\\d{2})-(\\d{2})[ T](\\d{2}):(\\d{2}):(\\d{2})/); if (m) return new Date(m[1] + '-' + m[2] + '-' + m[3] + 'T' + m[4] + ':' + m[5] + ':' + m[6] + '+05:30').toISOString(); const d = new Date(s); return isNaN(d.getTime()) ? null : d.toISOString(); };\nconst slug = (v) => 'svc-' + S(v).toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '');\nconst env = (row) => S(pick(row, ['Environment', 'environment'], 'QA')) || 'QA';\nconst svcName = (row) => S(pick(row, ['Service Name', 'serviceName']));\nconst rows = () => $input.all().map((it) => it.json || {});\nconst MAX_ROWS = 1000;\nlet body = {};\ntry { body = $('API 10 - POST incidents-resolve').first().json.body || {}; } catch (e) { body = {}; }\nconst incidentId = S(body.incidentId);\nif (!incidentId) { return [{ json: { ok: false, error: 'incidentId is required' } }]; }\nreturn [{ json: {\n  'Incident ID': incidentId,\n  'Status': 'RESOLVED',\n  'Recovery Time': Date.now ? new Date(Date.now() + 19800000).toISOString().replace('T', ' ').slice(0, 19) : '',\n  'Resolved By': 'VWO QA Downtime Tracker dashboard',\n} }];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        620,
+        2640
+      ],
+      "id": "code-042-e7b1a4c9",
+      "name": "API 11a - Build Resolution Row"
+    },
+    {
+      "parameters": {
+        "operation": "appendOrUpdate",
+        "documentId": {
+          "__rl": true,
+          "mode": "list",
+          "value": "REPLACE_WITH_SPREADSHEET_ID"
+        },
+        "sheetName": {
+          "__rl": true,
+          "mode": "list",
+          "value": "Downtime_Incidents"
+        },
+        "columns": {
+          "mappingMode": "autoMapInputData",
+          "value": {},
+          "matchingColumns": [
+            "Incident ID"
+          ],
+          "schema": []
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.5,
+      "position": [
+        1020,
+        2640
+      ],
+      "id": "gs-043-e7b1a4c9",
+      "name": "API 11b - Upsert Incident Resolution"
+    },
+    {
+      "parameters": {
+        "respondWith": "allIncomingItems",
+        "options": {
+          "responseCode": 200
+        }
+      },
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [
+        1280,
+        2640
+      ],
+      "id": "resp-044-e7b1a4c9",
+      "name": "API 11c - Respond incidents-resolve",
+      "notes": "Marks an incident RESOLVED in Downtime_Incidents."
+    },
+    {
+      "parameters": {
+        "content": "## VWO QA Dashboard - read API\n\nWebhook layer for the VWO QA Downtime Tracker dashboard.\nAll data comes from the sheets written by `09_DownTime_Tracker`.\n\n| Endpoint | Sheet |\n| --- | --- |\n| GET /health-status | Health_Check_History |\n| GET /health-checks | Health_Check_History |\n| GET /logs | Health_Check_History |\n| GET /response-times | Health_Check_History |\n| GET /uptime | Daily_Availability |\n| GET /incidents | Downtime_Incidents |\n| GET /retry-history | Downtime_Incidents (derived) |\n| POST /health-check | triggers the monitor workflow |\n| GET /settings, POST /settings-write | Settings (Key/Value) |\n| POST /incidents-resolve | Downtime_Incidents |\n\n**Setup:**\n1. Replace `REPLACE_WITH_SPREADSHEET_ID` in every Google Sheets node (10) and\n   `REPLACE_WITH_MONITOR_WORKFLOW_ID` in `API 08c`.\n2. Attach your Google Sheets credential to those nodes.\n3. **Activate** the workflow - webhooks only respond while it is active.\n\n**Workbook tabs required**\n\n- `Health_Check_History` (written by the monitor)\n- `Downtime_Incidents` (written by the monitor)\n- `Daily_Availability` (written by the monitor)\n- `Settings` (optional - has Key/Value columns; when absent,\n  `GET /settings` returns defaults because `API 09a` is set to continue on error)\n\nBase URL of the webhooks: `https://<your-instance>/webhook/<path>`\n\n**Note:** the monitor workflow emits `UP` / `DOWN` / `DEGRADED` / `FUNCTIONAL_FAILURE`;\nthe mappers normalise these to the dashboard's `HEALTHY` / `DOWN` / `SLOW` / `FUNCTIONAL_FAILURE`.",
+        "height": 640,
+        "width": 460,
+        "color": 4
+      },
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        -260,
+        240
+      ],
+      "id": "note-045-e7b1a4c9",
+      "name": "README - Dashboard API"
+    }
+  ],
+  "connections": {
+    "API 01 - GET health-status": {
+      "main": [
+        [
+          {
+            "node": "API 01a - Read Health Check History",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "API 01a - Read Health Check History": {
+      "main": [
+        [
+          {
+            "node": "API 01b - Build Services + Summary",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "API 01b - Build Services + Summary": {
+      "main": [
+        [
+          {
+            "node": "API 01c - Respond health-status",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "API 02 - GET health-checks": {
+      "main": [
+        [
+          {
+            "node": "API 02a - Read Health Check History",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "API 02a - Read Health Check History": {
+      "main": [
+        [
+          {
+            "node": "API 02b - Map Health Checks",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "API 02b - Map Health Checks": {
+      "main": [
+        [
+          {
+            "node": "API 02c - Respond health-checks",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "API 03 - GET logs": {
+      "main": [
+        [
+          {
+            "node": "API 03a - Read Health Check History",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "API 03a - Read Health Check History": {
+      "main": [
+        [
+          {
+            "node": "API 03b - Map Log Entries",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "API 03b - Map Log Entries": {
+      "main": [
+        [
+          {
+            "node": "API 03c - Respond logs",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "API 04 - GET response-times": {
+      "main": [
+        [
+          {
+            "node": "API 04a - Read Health Check History",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "API 04a - Read Health Check History": {
+      "main": [
+        [
+          {
+            "node": "API 04b - Map Response Times",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "API 04b - Map Response Times": {
+      "main": [
+        [
+          {
+            "node": "API 04c - Respond response-times",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "API 05 - GET uptime": {
+      "main": [
+        [
+          {
+            "node": "API 05a - Read Daily Availability",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "API 05a - Read Daily Availability": {
+      "main": [
+        [
+          {
+            "node": "API 05b - Map Uptime",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "API 05b - Map Uptime": {
+      "main": [
+        [
+          {
+            "node": "API 05c - Respond uptime",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "API 06 - GET incidents": {
+      "main": [
+        [
+          {
+            "node": "API 06a - Read Downtime Incidents",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "API 06a - Read Downtime Incidents": {
+      "main": [
+        [
+          {
+            "node": "API 06b - Map Incidents",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "API 06b - Map Incidents": {
+      "main": [
+        [
+          {
+            "node": "API 06c - Respond incidents",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "API 07 - GET retry-history": {
+      "main": [
+        [
+          {
+            "node": "API 07a - Read Downtime Incidents",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "API 07a - Read Downtime Incidents": {
+      "main": [
+        [
+          {
+            "node": "API 07b - Derive Retry Attempts",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "API 07b - Derive Retry Attempts": {
+      "main": [
+        [
+          {
+            "node": "API 07c - Respond retry-history",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "API 08 - POST health-check": {
+      "main": [
+        [
+          {
+            "node": "API 08a - Acknowledge Health Check",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "API 08a - Acknowledge Health Check": {
+      "main": [
+        [
+          {
+            "node": "API 08b - Respond health-check",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "API 08b - Respond health-check": {
+      "main": [
+        [
+          {
+            "node": "API 08c - Run Monitoring Workflow",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "API 09 - GET settings": {
+      "main": [
+        [
+          {
+            "node": "API 09a - Read Settings Sheet",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "API 09a - Read Settings Sheet": {
+      "main": [
+        [
+          {
+            "node": "API 09b - Build Settings",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "API 09b - Build Settings": {
+      "main": [
+        [
+          {
+            "node": "API 09c - Respond settings",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "API 10 - POST settings": {
+      "main": [
+        [
+          {
+            "node": "API 10a - Normalise Settings Rows",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "API 10a - Normalise Settings Rows": {
+      "main": [
+        [
+          {
+            "node": "API 10b - Upsert Settings",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "API 10b - Upsert Settings": {
+      "main": [
+        [
+          {
+            "node": "API 10c - Respond settings-write",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "API 11 - POST incidents-resolve": {
+      "main": [
+        [
+          {
+            "node": "API 11a - Build Resolution Row",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "API 11a - Build Resolution Row": {
+      "main": [
+        [
+          {
+            "node": "API 11b - Upsert Incident Resolution",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "API 11b - Upsert Incident Resolution": {
+      "main": [
+        [
+          {
+            "node": "API 11c - Respond incidents-resolve",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "pinData": {},
+  "meta": {
+    "instanceId": "vwo-qa-downtime-tracker-dashboard-api",
+    "templateCredsSetupCompleted": false
+  },
+  "tags": []
+}

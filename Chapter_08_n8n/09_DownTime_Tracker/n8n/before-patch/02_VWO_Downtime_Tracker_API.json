@@ -1,0 +1,1601 @@
+{
+  "name": "02_VWO_Downtime_Tracker_API",
+  "nodes": [
+    {
+      "parameters": {
+        "path": "health-status",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [
+        272,
+        0
+      ],
+      "id": "46f4bf5a-0704-45c8-9472-c2dc40081468",
+      "name": "API 01 - GET health-status",
+      "webhookId": "vwo-qa-health-status"
+    },
+    {
+      "parameters": {
+        "documentId": {
+          "__rl": true,
+          "value": "1vbA3hmYYne6XiLtcZp2CnX7SMFBjKFosoMMz73qm8Xg",
+          "mode": "list",
+          "cachedResultName": "सोलर पैनल सूचना माध्यमिक शिक्षा विभाग जनपद गाजियाबाद",
+          "cachedResultUrl": "https://docs.google.com/spreadsheets/d/1vbA3hmYYne6XiLtcZp2CnX7SMFBjKFosoMMz73qm8Xg/edit?usp=drivesdk"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": 1773284521,
+          "mode": "list",
+          "cachedResultName": "Health_Check_History",
+          "cachedResultUrl": "https://docs.google.com/spreadsheets/d/1vbA3hmYYne6XiLtcZp2CnX7SMFBjKFosoMMz73qm8Xg/edit#gid=1773284521"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.5,
+      "position": [
+        528,
+        0
+      ],
+      "id": "424586a5-3596-4f80-82dd-7e9eb1039fd8",
+      "name": "API 01a - Read Health Check History",
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "MJv8r8KlvPbAtJGG",
+          "name": "Google Sheets account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const rows = $input.all().map(item => item.json);\n\n// Get environment from webhook query, default QA\nlet requestedEnvironment = 'QA';\n\ntry {\n  requestedEnvironment =\n    $('API 01 - GET health-status').first().json.query?.environment || 'QA';\n} catch (e) {\n  requestedEnvironment = 'QA';\n}\n\n// Only use requested environment\nconst environmentRows = rows.filter(\n  row => (row['Environment'] || 'QA') === requestedEnvironment\n);\n\n// Convert timestamp into something sortable\nfunction timestampValue(value) {\n  if (!value) return 0;\n\n  // \"2026-09-10 15:28:49\" -> valid ISO-like format\n  const normalized = String(value).replace(' ', 'T');\n  const parsed = new Date(normalized).getTime();\n\n  return Number.isNaN(parsed) ? 0 : parsed;\n}\n\n// Find latest record for every service\nconst latestByService = {};\n\nfor (const row of environmentRows) {\n  const serviceName = row['Service Name'];\n\n  if (!serviceName) continue;\n\n  const existing = latestByService[serviceName];\n\n  if (\n    !existing ||\n    timestampValue(row['Timestamp']) >\n      timestampValue(existing['Timestamp'])\n  ) {\n    latestByService[serviceName] = row;\n  }\n}\n\nconst latestRows = Object.values(latestByService);\n\n// Convert sheet health status into dashboard status\nfunction mapStatus(row) {\n  const healthStatus = String(row['Health Status'] || '').toUpperCase();\n  const functionalValidation = String(\n    row['Functional Validation'] || ''\n  ).toUpperCase();\n\n  if (\n    healthStatus === 'UP' &&\n    functionalValidation === 'PASS'\n  ) {\n    return 'HEALTHY';\n  }\n\n  if (healthStatus === 'SLOW') {\n    return 'SLOW';\n  }\n\n  if (\n    healthStatus === 'DOWN' ||\n    healthStatus === 'FAILED'\n  ) {\n    return 'DOWN';\n  }\n\n  if (functionalValidation === 'FAIL') {\n    return 'FUNCTIONAL_FAILURE';\n  }\n\n  return 'UNKNOWN';\n}\n\nconst services = latestRows.map(row => ({\n  name: row['Service Name'],\n  application: row['Application'] || 'VWO',\n  environment: row['Environment'] || requestedEnvironment,\n  checkType: row['Check Type'] || 'HTTP',\n  endpoint: row['Endpoint'] || '',\n  httpStatus: Number(row['HTTP Status'] || 0),\n  responseTimeMs: Number(row['Response Time Ms'] || 0),\n  responseTimeThresholdMs: Number(\n    row['Response Time Threshold Ms'] || 3000\n  ),\n  status: mapStatus(row),\n  functionalValidation: row['Functional Validation'] || '',\n  retryCount: Number(row['Retry Count'] || 0),\n  errorMessage: row['Error Message'] || '',\n  critical: Boolean(row['Critical']),\n  lastCheckedAt: row['Timestamp'] || ''\n}));\n\nconst healthyServices = services.filter(\n  service => service.status === 'HEALTHY'\n).length;\n\nconst failedServices = services.filter(\n  service =>\n    service.status === 'DOWN' ||\n    service.status === 'FUNCTIONAL_FAILURE'\n).length;\n\nconst slowServices = services.filter(\n  service => service.status === 'SLOW'\n).length;\n\nconst averageResponseTimeMs =\n  services.length > 0\n    ? Math.round(\n        services.reduce(\n          (sum, service) => sum + service.responseTimeMs,\n          0\n        ) / services.length\n      )\n    : 0;\n\nconst latestTimestamp =\n  latestRows.length > 0\n    ? latestRows\n        .map(row => row['Timestamp'])\n        .filter(Boolean)\n        .sort()\n        .at(-1) || ''\n    : '';\n\nlet overallStatus = 'UNKNOWN';\n\nif (services.length > 0) {\n  if (failedServices > 0) {\n    overallStatus = 'DOWN';\n  } else if (slowServices > 0) {\n    overallStatus = 'DEGRADED';\n  } else {\n    overallStatus = 'HEALTHY';\n  }\n}\n\nconst uptimePct =\n  services.length > 0\n    ? Number(\n        ((healthyServices / services.length) * 100).toFixed(2)\n      )\n    : 0;\n\nreturn [\n  {\n    json: {\n      summary: {\n        overallStatus,\n        servicesMonitored: services.length,\n        healthyServices,\n        failedServices,\n        activeIncidents: 0,\n        averageResponseTimeMs,\n        uptimePct,\n        lastCheckedAt: latestTimestamp,\n        environment: requestedEnvironment\n      },\n      services\n    }\n  }\n];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        880,
+        0
+      ],
+      "id": "66c468a6-59a9-4581-9802-9ec1cb261397",
+      "name": "API 01b - Build Services + Summary"
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ $json }}",
+        "options": {
+          "responseCode": 200
+        }
+      },
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [
+        1280,
+        0
+      ],
+      "id": "336b76f2-7f57-482d-84a5-205a9fcd1965",
+      "name": "API 01c - Respond health-status",
+      "notes": "Returns { summary, services } - the dashboard's primary payload."
+    },
+    {
+      "parameters": {
+        "path": "health-checks",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [
+        272,
+        240
+      ],
+      "id": "56ff2a73-a158-4420-9224-d43c6b45dda8",
+      "name": "API 02 - GET health-checks",
+      "webhookId": "vwo-qa-health-checks"
+    },
+    {
+      "parameters": {
+        "documentId": {
+          "__rl": true,
+          "value": "1vbA3hmYYne6XiLtcZp2CnX7SMFBjKFosoMMz73qm8Xg",
+          "mode": "list",
+          "cachedResultName": "सोलर पैनल सूचना माध्यमिक शिक्षा विभाग जनपद गाजियाबाद",
+          "cachedResultUrl": "https://docs.google.com/spreadsheets/d/1vbA3hmYYne6XiLtcZp2CnX7SMFBjKFosoMMz73qm8Xg/edit?usp=drivesdk"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": 1773284521,
+          "mode": "list",
+          "cachedResultName": "Health_Check_History",
+          "cachedResultUrl": "https://docs.google.com/spreadsheets/d/1vbA3hmYYne6XiLtcZp2CnX7SMFBjKFosoMMz73qm8Xg/edit#gid=1773284521"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.5,
+      "position": [
+        528,
+        240
+      ],
+      "id": "05109c89-3d80-4884-aa6b-23e0cb59750d",
+      "name": "API 02a - Read Health Check History",
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "MJv8r8KlvPbAtJGG",
+          "name": "Google Sheets account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const rows = $input.all().map(item => item.json);\n\n// Read requested environment from webhook\nlet requestedEnvironment = 'QA';\n\ntry {\n  requestedEnvironment =\n    $('API 02 - GET health-checks').first().json.query?.environment || 'QA';\n} catch (e) {\n  requestedEnvironment = 'QA';\n}\n\n// Filter by environment\nconst filteredRows = rows.filter(\n  row => (row['Environment'] || 'QA') === requestedEnvironment\n);\n\n// Convert Google Sheet rows into clean dashboard/API objects\nconst healthChecks = filteredRows.map(row => ({\n  timestamp: row['Timestamp'] || '',\n  application: row['Application'] || 'VWO',\n  environment: row['Environment'] || requestedEnvironment,\n\n  serviceName: row['Service Name'] || '',\n  checkType: row['Check Type'] || 'HTTP',\n  endpoint: row['Endpoint'] || '',\n\n  httpStatus: Number(row['HTTP Status'] || 0),\n  responseTimeMs: Number(row['Response Time Ms'] || 0),\n  responseTimeThresholdMs: Number(\n    row['Response Time Threshold Ms'] || 3000\n  ),\n\n  healthStatus: row['Health Status'] || 'UNKNOWN',\n  functionalValidation: row['Functional Validation'] || '',\n\n  retryCount: Number(row['Retry Count'] || 0),\n  errorMessage: row['Error Message'] || '',\n\n  workflowExecutionId: String(\n    row['Workflow Execution ID'] || ''\n  ),\n\n  critical:\n    row['Critical'] === true ||\n    String(row['Critical']).toLowerCase() === 'true'\n}));\n\n// Newest checks first\nhealthChecks.sort((a, b) =>\n  String(b.timestamp).localeCompare(String(a.timestamp))\n);\n\nreturn [\n  {\n    json: {\n      environment: requestedEnvironment,\n      count: healthChecks.length,\n      healthChecks\n    }\n  }\n];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        880,
+        240
+      ],
+      "id": "eaf387da-3bd3-4913-a1d5-bfda2b973c5b",
+      "name": "API 02b - Map Health Checks"
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ $json }}",
+        "options": {
+          "responseCode": 200
+        }
+      },
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [
+        1280,
+        240
+      ],
+      "id": "145c2838-00be-4eac-88b3-ed4cd2368440",
+      "name": "API 02c - Respond health-checks",
+      "notes": "HealthCheck[] - one item per recorded check."
+    },
+    {
+      "parameters": {
+        "path": "logs",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [
+        272,
+        480
+      ],
+      "id": "5b3ba678-6ee9-4ac4-a5e6-404dc3567148",
+      "name": "API 03 - GET logs",
+      "webhookId": "vwo-qa-logs"
+    },
+    {
+      "parameters": {
+        "documentId": {
+          "__rl": true,
+          "value": "1vbA3hmYYne6XiLtcZp2CnX7SMFBjKFosoMMz73qm8Xg",
+          "mode": "list",
+          "cachedResultName": "सोलर पैनल सूचना माध्यमिक शिक्षा विभाग जनपद गाजियाबाद",
+          "cachedResultUrl": "https://docs.google.com/spreadsheets/d/1vbA3hmYYne6XiLtcZp2CnX7SMFBjKFosoMMz73qm8Xg/edit?usp=drivesdk"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": 1773284521,
+          "mode": "list",
+          "cachedResultName": "Health_Check_History",
+          "cachedResultUrl": "https://docs.google.com/spreadsheets/d/1vbA3hmYYne6XiLtcZp2CnX7SMFBjKFosoMMz73qm8Xg/edit#gid=1773284521"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.5,
+      "position": [
+        528,
+        480
+      ],
+      "id": "3948a205-6561-4d40-bd26-c7136e34ef8c",
+      "name": "API 03a - Read Health Check History",
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "MJv8r8KlvPbAtJGG",
+          "name": "Google Sheets account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const rows = $input.all().map(item => item.json);\n\n// Read requested environment from webhook.\n// Default to QA if no environment is provided.\nlet requestedEnvironment = 'QA';\n\ntry {\n  requestedEnvironment =\n    $('API 03 - GET logs').first().json.query?.environment || 'QA';\n} catch (e) {\n  requestedEnvironment = 'QA';\n}\n\n// Filter records by environment\nconst filteredRows = rows.filter(\n  row => (row['Environment'] || 'QA') === requestedEnvironment\n);\n\n// Convert health-check history into dashboard log entries\nconst logs = filteredRows.map(row => {\n  const healthStatus = String(\n    row['Health Status'] || 'UNKNOWN'\n  ).toUpperCase();\n\n  const functionalValidation = String(\n    row['Functional Validation'] || ''\n  ).toUpperCase();\n\n  // Determine log level\n  let level = 'INFO';\n\n  if (\n    healthStatus === 'DOWN' ||\n    healthStatus === 'FAILED' ||\n    functionalValidation === 'FAIL'\n  ) {\n    level = 'ERROR';\n  } else if (\n    healthStatus === 'SLOW' ||\n    Number(row['Response Time Ms'] || 0) >\n      Number(row['Response Time Threshold Ms'] || 3000)\n  ) {\n    level = 'WARN';\n  }\n\n  // Build readable message\n  let message = `${row['Service Name'] || 'Unknown Service'} health check`;\n\n  if (healthStatus === 'UP') {\n    message += ` passed (${row['HTTP Status'] || 0})`;\n  } else {\n    message += ` returned ${healthStatus}`;\n  }\n\n  if (row['Error Message']) {\n    message += ` - ${row['Error Message']}`;\n  }\n\n  return {\n    timestamp: row['Timestamp'] || '',\n    level,\n    application: row['Application'] || 'VWO',\n    environment: row['Environment'] || requestedEnvironment,\n    serviceName: row['Service Name'] || '',\n    checkType: row['Check Type'] || 'HTTP',\n    endpoint: row['Endpoint'] || '',\n    httpStatus: Number(row['HTTP Status'] || 0),\n    responseTimeMs: Number(row['Response Time Ms'] || 0),\n    healthStatus,\n    functionalValidation:\n      row['Functional Validation'] || '',\n    retryCount: Number(row['Retry Count'] || 0),\n    message,\n    errorMessage: row['Error Message'] || '',\n    workflowExecutionId: String(\n      row['Workflow Execution ID'] || ''\n    ),\n    critical:\n      row['Critical'] === true ||\n      String(row['Critical']).toLowerCase() === 'true'\n  };\n});\n\n// Newest logs first\nlogs.sort((a, b) =>\n  String(b.timestamp).localeCompare(String(a.timestamp))\n);\n\nreturn [\n  {\n    json: {\n      environment: requestedEnvironment,\n      count: logs.length,\n      logs\n    }\n  }\n];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        880,
+        480
+      ],
+      "id": "a6f54e08-3002-48ae-9f3d-8dd9001df725",
+      "name": "API 03b - Map Log Entries"
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ $json }}",
+        "options": {
+          "responseCode": 200
+        }
+      },
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [
+        1280,
+        480
+      ],
+      "id": "20a0255d-ca99-4d07-9e8d-582ce22c0d1f",
+      "name": "API 03c - Respond logs",
+      "notes": "LogEntry[] - flattened check log."
+    },
+    {
+      "parameters": {
+        "path": "response-times",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [
+        272,
+        720
+      ],
+      "id": "30d1bbe1-f5b5-4185-824f-39b9afcf262a",
+      "name": "API 04 - GET response-times",
+      "webhookId": "vwo-qa-response-times"
+    },
+    {
+      "parameters": {
+        "documentId": {
+          "__rl": true,
+          "value": "1vbA3hmYYne6XiLtcZp2CnX7SMFBjKFosoMMz73qm8Xg",
+          "mode": "list",
+          "cachedResultName": "सोलर पैनल सूचना माध्यमिक शिक्षा विभाग जनपद गाजियाबाद",
+          "cachedResultUrl": "https://docs.google.com/spreadsheets/d/1vbA3hmYYne6XiLtcZp2CnX7SMFBjKFosoMMz73qm8Xg/edit?usp=drivesdk"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": 1773284521,
+          "mode": "list",
+          "cachedResultName": "Health_Check_History",
+          "cachedResultUrl": "https://docs.google.com/spreadsheets/d/1vbA3hmYYne6XiLtcZp2CnX7SMFBjKFosoMMz73qm8Xg/edit#gid=1773284521"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.5,
+      "position": [
+        528,
+        720
+      ],
+      "id": "f229a6bb-e230-44d8-96b9-d593dee9bc22",
+      "name": "API 04a - Read Health Check History",
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "MJv8r8KlvPbAtJGG",
+          "name": "Google Sheets account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const rows = $input.all().map(item => item.json);\n\n// Get environment from API 04 webhook\nlet requestedEnvironment = 'QA';\n\ntry {\n  requestedEnvironment =\n    $('API 04 - GET response-times').first().json.query?.environment || 'QA';\n} catch (e) {\n  requestedEnvironment = 'QA';\n}\n\n// Filter by requested environment\nconst filteredRows = rows.filter(\n  row => (row['Environment'] || 'QA') === requestedEnvironment\n);\n\n// Convert sheet rows into response-time metrics\nconst responseTimes = filteredRows.map(row => {\n  const responseTimeMs = Number(row['Response Time Ms'] || 0);\n  const thresholdMs = Number(\n    row['Response Time Threshold Ms'] || 3000\n  );\n\n  let status = 'HEALTHY';\n\n  if (\n    String(row['Health Status'] || '').toUpperCase() === 'DOWN' ||\n    String(row['Health Status'] || '').toUpperCase() === 'FAILED'\n  ) {\n    status = 'DOWN';\n  } else if (responseTimeMs > thresholdMs) {\n    status = 'SLOW';\n  }\n\n  return {\n    timestamp: row['Timestamp'] || '',\n    application: row['Application'] || 'VWO',\n    environment: row['Environment'] || requestedEnvironment,\n    serviceName: row['Service Name'] || '',\n    endpoint: row['Endpoint'] || '',\n    responseTimeMs,\n    thresholdMs,\n    httpStatus: Number(row['HTTP Status'] || 0),\n    status,\n    workflowExecutionId: String(\n      row['Workflow Execution ID'] || ''\n    )\n  };\n});\n\n// Newest first\nresponseTimes.sort((a, b) =>\n  String(b.timestamp).localeCompare(String(a.timestamp))\n);\n\n// Calculate useful chart summary\nconst values = responseTimes\n  .map(item => item.responseTimeMs)\n  .filter(value => Number.isFinite(value));\n\nconst averageResponseTimeMs =\n  values.length > 0\n    ? Math.round(\n        values.reduce((sum, value) => sum + value, 0) /\n        values.length\n      )\n    : 0;\n\nconst minResponseTimeMs =\n  values.length > 0 ? Math.min(...values) : 0;\n\nconst maxResponseTimeMs =\n  values.length > 0 ? Math.max(...values) : 0;\n\nreturn [\n  {\n    json: {\n      environment: requestedEnvironment,\n      count: responseTimes.length,\n      summary: {\n        averageResponseTimeMs,\n        minResponseTimeMs,\n        maxResponseTimeMs\n      },\n      responseTimes\n    }\n  }\n];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        880,
+        720
+      ],
+      "id": "f81063cd-9c3b-4603-9b23-9029936d6bd5",
+      "name": "API 04b - Map Response Times"
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ $json }}",
+        "options": {
+          "responseCode": 200
+        }
+      },
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [
+        1280,
+        720
+      ],
+      "id": "b9b27af4-9cf0-41b0-aee6-f22f3fe73c16",
+      "name": "API 04c - Respond response-times",
+      "notes": "ResponseTimeMetric[] - 24h latency series."
+    },
+    {
+      "parameters": {
+        "path": "uptime",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [
+        272,
+        960
+      ],
+      "id": "30ad851a-3b90-4411-b661-f5e0e21433da",
+      "name": "API 05 - GET uptime",
+      "webhookId": "vwo-qa-uptime"
+    },
+    {
+      "parameters": {
+        "documentId": {
+          "__rl": true,
+          "value": "1vbA3hmYYne6XiLtcZp2CnX7SMFBjKFosoMMz73qm8Xg",
+          "mode": "list",
+          "cachedResultName": "सोलर पैनल सूचना माध्यमिक शिक्षा विभाग जनपद गाजियाबाद",
+          "cachedResultUrl": "https://docs.google.com/spreadsheets/d/1vbA3hmYYne6XiLtcZp2CnX7SMFBjKFosoMMz73qm8Xg/edit?usp=drivesdk"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": 1478199802,
+          "mode": "list",
+          "cachedResultName": "Daily_Availability",
+          "cachedResultUrl": "https://docs.google.com/spreadsheets/d/1vbA3hmYYne6XiLtcZp2CnX7SMFBjKFosoMMz73qm8Xg/edit#gid=1478199802"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.5,
+      "position": [
+        528,
+        960
+      ],
+      "id": "1a43caba-b65e-4122-9254-9a83034b5be9",
+      "name": "API 05a - Read Daily Availability",
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "MJv8r8KlvPbAtJGG",
+          "name": "Google Sheets account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const rows = $input.all().map(item => item.json);\n\n// Read environment from webhook, default QA\nlet requestedEnvironment = 'QA';\n\ntry {\n  requestedEnvironment =\n    $('API 05 - GET uptime').first().json.query?.environment || 'QA';\n} catch (e) {\n  requestedEnvironment = 'QA';\n}\n\n// Prefer OVERALL / ALL_SERVICES rows.\n// If environment-specific rows exist, allow those too.\nconst relevantRows = rows.filter(row => {\n  const env = String(row['Environment'] || '').toUpperCase();\n  const service = String(row['Service Name'] || '').toUpperCase();\n\n  return (\n    env === requestedEnvironment.toUpperCase() ||\n    env === 'OVERALL'\n  ) && (\n    service === 'ALL_SERVICES' ||\n    service === ''\n  );\n});\n\n// Map into clean uptime objects\nconst uptime = relevantRows.map(row => ({\n  date: row['Date'] || '',\n  application: row['Application'] || 'VWO',\n  environment: row['Environment'] || requestedEnvironment,\n  serviceName: row['Service Name'] || 'ALL_SERVICES',\n  totalChecks: Number(row['Total Checks'] || 0),\n  failedChecks: Number(row['Failed Checks'] || 0),\n  availabilityPercentage: Number(\n    row['Availability Percentage'] || 0\n  ),\n  updatedAt: row['Updated At'] || ''\n}));\n\n// Sort oldest -> newest for charting\nuptime.sort((a, b) =>\n  String(a.date).localeCompare(String(b.date))\n);\n\n// Latest availability summary\nconst latest = uptime.length > 0\n  ? uptime[uptime.length - 1]\n  : null;\n\nreturn [\n  {\n    json: {\n      environment: requestedEnvironment,\n      count: uptime.length,\n      summary: {\n        currentUptimePct: latest\n          ? latest.availabilityPercentage\n          : 0,\n        totalChecks: latest\n          ? latest.totalChecks\n          : 0,\n        failedChecks: latest\n          ? latest.failedChecks\n          : 0,\n        lastUpdatedAt: latest\n          ? latest.updatedAt\n          : ''\n      },\n      uptime\n    }\n  }\n];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        880,
+        960
+      ],
+      "id": "f79a48c3-7293-4dad-911b-cbe961928551",
+      "name": "API 05b - Map Uptime"
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ $json }}",
+        "options": {
+          "responseCode": 200
+        }
+      },
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [
+        1280,
+        960
+      ],
+      "id": "b1455407-ada3-4f2c-9758-3c8c8d9b57bb",
+      "name": "API 05c - Respond uptime",
+      "notes": "UptimePoint[] - daily availability (OVERALL / ALL_SERVICES rows)."
+    },
+    {
+      "parameters": {
+        "path": "incidents",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [
+        272,
+        1200
+      ],
+      "id": "a4ec25db-b5af-4540-9ea3-d29533b836d0",
+      "name": "API 06 - GET incidents",
+      "webhookId": "vwo-qa-incidents"
+    },
+    {
+      "parameters": {
+        "documentId": {
+          "__rl": true,
+          "value": "1vbA3hmYYne6XiLtcZp2CnX7SMFBjKFosoMMz73qm8Xg",
+          "mode": "list",
+          "cachedResultName": "सोलर पैनल सूचना माध्यमिक शिक्षा विभाग जनपद गाजियाबाद",
+          "cachedResultUrl": "https://docs.google.com/spreadsheets/d/1vbA3hmYYne6XiLtcZp2CnX7SMFBjKFosoMMz73qm8Xg/edit?usp=drivesdk"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": 1127707547,
+          "mode": "list",
+          "cachedResultName": "Downtime_Incidents",
+          "cachedResultUrl": "https://docs.google.com/spreadsheets/d/1vbA3hmYYne6XiLtcZp2CnX7SMFBjKFosoMMz73qm8Xg/edit#gid=1127707547"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.5,
+      "position": [
+        528,
+        1200
+      ],
+      "id": "8242abef-fd50-4cfd-a119-b9534475c4fe",
+      "name": "API 06a - Read Downtime Incidents",
+      "alwaysOutputData": true,
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "MJv8r8KlvPbAtJGG",
+          "name": "Google Sheets account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const rows = $input.all()\n  .map(item => item.json)\n  .filter(row =>\n    row &&\n    Object.keys(row).length > 0 &&\n    (\n      row['Incident ID'] ||\n      row['Service Name'] ||\n      row['Downtime Start']\n    )\n  );\n\n// Get environment from API 06 webhook\nlet requestedEnvironment = 'QA';\nlet requestedIncidentId = '';\n\ntry {\n  const query =\n    $('API 06 - GET incidents').first().json.query || {};\n\n  requestedEnvironment = query.environment || 'QA';\n  requestedIncidentId = query.id || '';\n} catch (e) {\n  requestedEnvironment = 'QA';\n}\n\n// Filter incidents by environment\nlet filteredRows = rows.filter(row => {\n  const environment =\n    row['Environment'] || requestedEnvironment;\n\n  return environment === requestedEnvironment;\n});\n\n// If ?id=INC-xxx was supplied, return only that incident\nif (requestedIncidentId) {\n  filteredRows = filteredRows.filter(\n    row =>\n      String(row['Incident ID'] || '') ===\n      String(requestedIncidentId)\n  );\n}\n\n// Map Google Sheet rows into clean incident objects\nconst incidents = filteredRows.map(row => {\n  const status = String(\n    row['Status'] || 'OPEN'\n  ).toUpperCase();\n\n  const retryCount = Number(\n    row['Retry Count'] || 0\n  );\n\n  const downtimeSeconds = Number(\n    row['Downtime Seconds'] || 0\n  );\n\n  const timeline = [];\n\n  if (row['Downtime Start']) {\n    timeline.push({\n      type: 'INCIDENT_STARTED',\n      timestamp: row['Downtime Start'],\n      message: 'Service failure detected'\n    });\n  }\n\n  if (retryCount >= 1) {\n    timeline.push({\n      type: 'RETRY',\n      attempt: 2,\n      delaySeconds: 20,\n      message: 'Retry attempt after 20 seconds'\n    });\n  }\n\n  if (retryCount >= 2) {\n    timeline.push({\n      type: 'RETRY',\n      attempt: 3,\n      delaySeconds: 30,\n      message: 'Final retry attempt after 30 seconds'\n    });\n  }\n\n  if (row['Recovery Time']) {\n    timeline.push({\n      type: 'RECOVERED',\n      timestamp: row['Recovery Time'],\n      message: 'Service recovered'\n    });\n  }\n\n  if (row['Resolved At']) {\n    timeline.push({\n      type: 'RESOLVED',\n      timestamp: row['Resolved At'],\n      message: row['Resolved By']\n        ? `Incident resolved by ${row['Resolved By']}`\n        : 'Incident resolved'\n    });\n  }\n\n  return {\n    incidentId: row['Incident ID'] || '',\n    application: row['Application'] || 'VWO',\n    environment:\n      row['Environment'] || requestedEnvironment,\n    serviceName: row['Service Name'] || '',\n    endpoint: row['Endpoint'] || '',\n    status,\n    severity: row['Severity'] || 'UNKNOWN',\n    downtimeStart: row['Downtime Start'] || '',\n    recoveryTime: row['Recovery Time'] || '',\n    downtimeSeconds,\n    retryCount,\n    httpStatus: Number(\n      row['HTTP Status'] || 0\n    ),\n    responseTimeMs: Number(\n      row['Response Time Ms'] || 0\n    ),\n    failureReason: row['Failure Reason'] || '',\n    httpResponse: row['HTTP Response'] || '',\n    workflowExecutionId: String(\n      row['Workflow Execution ID'] || ''\n    ),\n    resolvedAt: row['Resolved At'] || '',\n    resolvedBy: row['Resolved By'] || '',\n    timeline\n  };\n});\n\n// Newest incidents first\nincidents.sort((a, b) =>\n  String(b.downtimeStart)\n    .localeCompare(String(a.downtimeStart))\n);\n\nconst activeIncidents = incidents.filter(\n  incident =>\n    incident.status === 'OPEN' ||\n    incident.status === 'ACTIVE' ||\n    incident.status === 'INVESTIGATING'\n).length;\n\nreturn [\n  {\n    json: {\n      environment: requestedEnvironment,\n      count: incidents.length,\n      activeIncidents,\n      incidents\n    }\n  }\n];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        880,
+        1200
+      ],
+      "id": "6b3c9a01-85aa-445e-9881-3a660f56b7b1",
+      "name": "API 06b - Map Incidents"
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ $json }}",
+        "options": {
+          "responseCode": 200
+        }
+      },
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [
+        1280,
+        1200
+      ],
+      "id": "e14618ab-0b01-45a0-b8bc-1745ce8e1b6c",
+      "name": "API 06c - Respond incidents",
+      "notes": "Incident[] - supports ?id=INC-... and ?environment=QA."
+    },
+    {
+      "parameters": {
+        "path": "retry-history",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [
+        272,
+        1440
+      ],
+      "id": "a839b449-0772-4fec-bb56-509a75179b1e",
+      "name": "API 07 - GET retry-history",
+      "webhookId": "vwo-qa-retry-history"
+    },
+    {
+      "parameters": {
+        "documentId": {
+          "__rl": true,
+          "value": "1vbA3hmYYne6XiLtcZp2CnX7SMFBjKFosoMMz73qm8Xg",
+          "mode": "list",
+          "cachedResultName": "सोलर पैनल सूचना माध्यमिक शिक्षा विभाग जनपद गाजियाबाद",
+          "cachedResultUrl": "https://docs.google.com/spreadsheets/d/1vbA3hmYYne6XiLtcZp2CnX7SMFBjKFosoMMz73qm8Xg/edit?usp=drivesdk"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": 1127707547,
+          "mode": "list",
+          "cachedResultName": "Downtime_Incidents",
+          "cachedResultUrl": "https://docs.google.com/spreadsheets/d/1vbA3hmYYne6XiLtcZp2CnX7SMFBjKFosoMMz73qm8Xg/edit#gid=1127707547"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.5,
+      "position": [
+        528,
+        1440
+      ],
+      "id": "98e8c5e6-ded1-419d-a65c-26abac884891",
+      "name": "API 07a - Read Downtime Incidents",
+      "alwaysOutputData": true,
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "MJv8r8KlvPbAtJGG",
+          "name": "Google Sheets account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const rows = $input.all()\n  .map(item => item.json)\n  .filter(row =>\n    row &&\n    Object.keys(row).length > 0 &&\n    (\n      row['Incident ID'] ||\n      row['Service Name'] ||\n      row['Downtime Start']\n    )\n  );\n\n// Get environment from API 07 webhook\nlet requestedEnvironment = 'QA';\n\ntry {\n  requestedEnvironment =\n    $('API 07 - GET retry-history').first().json.query?.environment || 'QA';\n} catch (e) {\n  requestedEnvironment = 'QA';\n}\n\n// Filter incidents by environment\nconst filteredRows = rows.filter(row =>\n  (row['Environment'] || requestedEnvironment) === requestedEnvironment\n);\n\nconst retryHistory = [];\n\nfor (const row of filteredRows) {\n  const retryCount = Number(row['Retry Count'] || 0);\n\n  // Retry #1 = attempt 2 after initial request\n  if (retryCount >= 1) {\n    retryHistory.push({\n      incidentId: row['Incident ID'] || '',\n      application: row['Application'] || 'VWO',\n      environment: row['Environment'] || requestedEnvironment,\n      serviceName: row['Service Name'] || '',\n      endpoint: row['Endpoint'] || '',\n\n      attempt: 2,\n      retryNumber: 1,\n      delaySeconds: 20,\n\n      status: row['Status'] || '',\n      severity: row['Severity'] || '',\n\n      httpStatus: Number(row['HTTP Status'] || 0),\n      responseTimeMs: Number(row['Response Time Ms'] || 0),\n\n      failureReason: row['Failure Reason'] || '',\n      workflowExecutionId: String(\n        row['Workflow Execution ID'] || ''\n      ),\n\n      incidentStartedAt: row['Downtime Start'] || ''\n    });\n  }\n\n  // Retry #2 = attempt 3 / final retry\n  if (retryCount >= 2) {\n    retryHistory.push({\n      incidentId: row['Incident ID'] || '',\n      application: row['Application'] || 'VWO',\n      environment: row['Environment'] || requestedEnvironment,\n      serviceName: row['Service Name'] || '',\n      endpoint: row['Endpoint'] || '',\n\n      attempt: 3,\n      retryNumber: 2,\n      delaySeconds: 30,\n\n      status: row['Status'] || '',\n      severity: row['Severity'] || '',\n\n      httpStatus: Number(row['HTTP Status'] || 0),\n      responseTimeMs: Number(row['Response Time Ms'] || 0),\n\n      failureReason: row['Failure Reason'] || '',\n      workflowExecutionId: String(\n        row['Workflow Execution ID'] || ''\n      ),\n\n      incidentStartedAt: row['Downtime Start'] || ''\n    });\n  }\n}\n\n// Newest incidents first\nretryHistory.sort((a, b) =>\n  String(b.incidentStartedAt)\n    .localeCompare(String(a.incidentStartedAt))\n);\n\nreturn [\n  {\n    json: {\n      environment: requestedEnvironment,\n      count: retryHistory.length,\n      retryHistory\n    }\n  }\n];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        880,
+        1440
+      ],
+      "id": "d63f0b81-4172-429b-bbd2-31e10555fb4f",
+      "name": "API 07b - Derive Retry Attempts",
+      "alwaysOutputData": false
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ $json }}",
+        "options": {
+          "responseCode": 200
+        }
+      },
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [
+        1280,
+        1440
+      ],
+      "id": "781761a2-9553-4573-b660-f5720c16ae4c",
+      "name": "API 07c - Respond retry-history",
+      "notes": "RetryAttempt[] - derived from incident rows using the 20s/30s policy."
+    },
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "health-check",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [
+        272,
+        1680
+      ],
+      "id": "cd4f1778-42cc-4700-9f15-aebd38ec2a5a",
+      "name": "API 08 - POST health-check",
+      "webhookId": "vwo-qa-health-check"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Get the incoming POST request\nconst input = $input.first()?.json || {};\n\n// Read environment from request body/query.\n// Default to QA if nothing was supplied.\nconst environment =\n  input.body?.environment ||\n  input.query?.environment ||\n  input.environment ||\n  'QA';\n\nconst triggeredAt = new Date().toISOString();\n\nreturn [\n  {\n    json: {\n      ok: true,\n      triggeredAt,\n      environment,\n      executionId: String($execution.id),\n      services: [],\n      message:\n        'Health check request accepted. Monitoring workflow will be triggered.'\n    }\n  }\n];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        880,
+        1680
+      ],
+      "id": "01172fff-0f44-4cd1-bd8d-96eb06f65d25",
+      "name": "API 08a - Acknowledge Health Check"
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ $json }}",
+        "options": {
+          "responseCode": 200
+        }
+      },
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [
+        1280,
+        1680
+      ],
+      "id": "894eb2ef-666c-4e4b-8e88-2d557c277eb8",
+      "name": "API 08b - Respond health-check",
+      "notes": "Answers immediately, then triggers the monitor workflow."
+    },
+    {
+      "parameters": {
+        "workflowId": {
+          "__rl": true,
+          "value": "srl0Eh43dQwUgCz2",
+          "mode": "list",
+          "cachedResultUrl": "/workflow/srl0Eh43dQwUgCz2",
+          "cachedResultName": "01_VWO_Downtime_Monitor"
+        },
+        "workflowInputs": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "environment": "={{ $json.environment || 'QA' }}"
+          },
+          "matchingColumns": [
+            "environment"
+          ],
+          "schema": [
+            {
+              "id": "environment",
+              "displayName": "environment",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "canBeUsedToMatch": true,
+              "type": "string",
+              "removed": false
+            }
+          ],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": true
+        },
+        "options": {
+          "waitForSubWorkflow": false
+        }
+      },
+      "type": "n8n-nodes-base.executeWorkflow",
+      "typeVersion": 1.2,
+      "position": [
+        1552,
+        1680
+      ],
+      "id": "6e7050b9-165d-4b19-94be-62f1e745408f",
+      "name": "API 08c - Run Monitoring Workflow"
+    },
+    {
+      "parameters": {
+        "path": "settings",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [
+        272,
+        1920
+      ],
+      "id": "467a8e95-a1b3-4f85-8b8d-3426298a9d00",
+      "name": "API 09 - GET settings",
+      "webhookId": "vwo-qa-settings-get"
+    },
+    {
+      "parameters": {
+        "documentId": {
+          "__rl": true,
+          "value": "1vbA3hmYYne6XiLtcZp2CnX7SMFBjKFosoMMz73qm8Xg",
+          "mode": "list",
+          "cachedResultName": "सोलर पैनल सूचना माध्यमिक शिक्षा विभाग जनपद गाजियाबाद",
+          "cachedResultUrl": "https://docs.google.com/spreadsheets/d/1vbA3hmYYne6XiLtcZp2CnX7SMFBjKFosoMMz73qm8Xg/edit?usp=drivesdk"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": 2080925929,
+          "mode": "list",
+          "cachedResultName": "Settings",
+          "cachedResultUrl": "https://docs.google.com/spreadsheets/d/1vbA3hmYYne6XiLtcZp2CnX7SMFBjKFosoMMz73qm8Xg/edit#gid=2080925929"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.5,
+      "position": [
+        528,
+        1920
+      ],
+      "id": "0b381831-8bc0-4a5b-be56-e7e56e39e4cb",
+      "name": "API 09a - Read Settings Sheet",
+      "alwaysOutputData": true,
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "MJv8r8KlvPbAtJGG",
+          "name": "Google Sheets account"
+        }
+      },
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "jsCode": "const rows = $input.all()\n  .map(item => item.json)\n  .filter(row =>\n    row &&\n    Object.keys(row).length > 0 &&\n    row['Key']\n  );\n\n// Default configuration\nconst settings = {\n  responseTimeThresholdMs: 3000,\n  retryAttempts: 3,\n  retryDelaysSeconds: [20, 30],\n  checkIntervalMinutes: 5,\n  environments: ['QA', 'Staging', 'Production']\n};\n\n// Convert Google Sheet Key/Value rows into settings\nfor (const row of rows) {\n  const key = String(row['Key'] || '').trim();\n  const rawValue = row['Value'];\n\n  if (!key) {\n    continue;\n  }\n\n  switch (key) {\n    case 'responseTimeThresholdMs':\n      settings.responseTimeThresholdMs =\n        Number(rawValue) || 3000;\n      break;\n\n    case 'retryAttempts':\n      settings.retryAttempts =\n        Number(rawValue) || 3;\n      break;\n\n    case 'retryDelaysSeconds':\n      if (Array.isArray(rawValue)) {\n        settings.retryDelaysSeconds =\n          rawValue.map(Number);\n      } else {\n        settings.retryDelaysSeconds =\n          String(rawValue)\n            .split(',')\n            .map(value => Number(value.trim()))\n            .filter(value => Number.isFinite(value));\n      }\n\n      if (settings.retryDelaysSeconds.length === 0) {\n        settings.retryDelaysSeconds = [20, 30];\n      }\n      break;\n\n    case 'checkIntervalMinutes':\n      settings.checkIntervalMinutes =\n        Number(rawValue) || 5;\n      break;\n\n    case 'environments':\n      if (Array.isArray(rawValue)) {\n        settings.environments = rawValue;\n      } else {\n        const environments =\n          String(rawValue)\n            .split(',')\n            .map(value => value.trim())\n            .filter(Boolean);\n\n        if (environments.length > 0) {\n          settings.environments = environments;\n        }\n      }\n      break;\n  }\n}\n\nreturn [\n  {\n    json: {\n      settings\n    }\n  }\n];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        880,
+        1920
+      ],
+      "id": "0697e284-3272-4abf-a203-8533438e6019",
+      "name": "API 09b - Build Settings"
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ $json }}",
+        "options": {
+          "responseCode": 200
+        }
+      },
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [
+        1280,
+        1920
+      ],
+      "id": "1f858278-5f9d-46c2-8d46-75a416e35bb2",
+      "name": "API 09c - Respond settings",
+      "notes": "DashboardSettings - falls back to documented defaults when the Settings sheet is missing or empty."
+    },
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "settings-write",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [
+        272,
+        2160
+      ],
+      "id": "0bdc9874-d2d7-4afa-bb90-cd5476ec0d74",
+      "name": "API 10 - POST settings",
+      "webhookId": "vwo-qa-settings-post"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Get incoming POST webhook data\nconst input = $input.first().json;\n\n// Webhook POST payload is inside \"body\"\nconst body = input.body ?? input;\n\n// Define the settings your API is allowed to update\nconst allowedSettings = [\n  'environment',\n  'responseTimeThresholdMs',\n  'retryCount',\n  'retryDelayMs',\n  'application',\n];\n\n// Convert supplied settings into rows\nconst rows = [];\n\nfor (const key of allowedSettings) {\n  if (\n    Object.prototype.hasOwnProperty.call(body, key) &&\n    body[key] !== undefined &&\n    body[key] !== null &&\n    body[key] !== ''\n  ) {\n    rows.push({\n      json: {\n        setting: key,\n        value: body[key],\n      },\n    });\n  }\n}\n\n// Nothing valid supplied\nif (rows.length === 0) {\n  return [\n    {\n      json: {\n        _noSettings: true,\n        message: 'No valid settings were supplied.',\n        receivedBody: body,\n      },\n    },\n  ];\n}\n\nreturn rows;"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        880,
+        2160
+      ],
+      "id": "03571326-2e39-4d8d-a241-1991a495cfc7",
+      "name": "API 10a - Normalise Settings Rows",
+      "alwaysOutputData": true
+    },
+    {
+      "parameters": {
+        "operation": "appendOrUpdate",
+        "documentId": {
+          "__rl": true,
+          "value": "1vbA3hmYYne6XiLtcZp2CnX7SMFBjKFosoMMz73qm8Xg",
+          "mode": "list",
+          "cachedResultName": "सोलर पैनल सूचना माध्यमिक शिक्षा विभाग जनपद गाजियाबाद",
+          "cachedResultUrl": "https://docs.google.com/spreadsheets/d/1vbA3hmYYne6XiLtcZp2CnX7SMFBjKFosoMMz73qm8Xg/edit?usp=drivesdk"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": 2080925929,
+          "mode": "list",
+          "cachedResultName": "Settings",
+          "cachedResultUrl": "https://docs.google.com/spreadsheets/d/1vbA3hmYYne6XiLtcZp2CnX7SMFBjKFosoMMz73qm8Xg/edit#gid=2080925929"
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "Key": "={{$json.setting}}",
+            "Value": "={{$json.value}}"
+          },
+          "matchingColumns": [
+            "Key"
+          ],
+          "schema": [
+            {
+              "id": "Key",
+              "displayName": "Key",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "Value",
+              "displayName": "Value",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            }
+          ],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.5,
+      "position": [
+        1280,
+        2160
+      ],
+      "id": "e35603f2-287d-4e65-a136-54e560f5d137",
+      "name": "API 10b - Upsert Settings",
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "MJv8r8KlvPbAtJGG",
+          "name": "Google Sheets account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ $json }}",
+        "options": {
+          "responseCode": 200
+        }
+      },
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [
+        1776,
+        2160
+      ],
+      "id": "57dc1b8e-5ef6-4925-8db1-350549875ad3",
+      "name": "API 10c - Respond settings-write",
+      "notes": "Persists Key/Value settings rows."
+    },
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "incidents-resolve",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [
+        272,
+        2400
+      ],
+      "id": "776c63f5-deea-415e-b0ec-f9a0c0eb07ff",
+      "name": "API 11 - POST incidents-resolve",
+      "webhookId": "vwo-qa-incidents-resolve"
+    },
+    {
+      "parameters": {
+        "operation": "update",
+        "documentId": {
+          "__rl": true,
+          "value": "1vbA3hmYYne6XiLtcZp2CnX7SMFBjKFosoMMz73qm8Xg",
+          "mode": "list",
+          "cachedResultName": "सोलर पैनल सूचना माध्यमिक शिक्षा विभाग जनपद गाजियाबाद",
+          "cachedResultUrl": "https://docs.google.com/spreadsheets/d/1vbA3hmYYne6XiLtcZp2CnX7SMFBjKFosoMMz73qm8Xg/edit?usp=drivesdk"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": 1127707547,
+          "mode": "list",
+          "cachedResultName": "Downtime_Incidents",
+          "cachedResultUrl": "https://docs.google.com/spreadsheets/d/1vbA3hmYYne6XiLtcZp2CnX7SMFBjKFosoMMz73qm8Xg/edit#gid=1127707547"
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "Incident ID": "={{ $json[\"Incident ID\"] }}",
+            "Status": "={{ $json[\"Status\"] }}",
+            "Recovery Time": "={{ $json[\"Recovery Time\"] }}",
+            "Downtime Seconds": "={{ $json[\"Downtime Seconds\"] }}",
+            " Workflow Execution ID": "={{ $json[\"Workflow Execution ID\"] }}"
+          },
+          "matchingColumns": [
+            "Incident ID"
+          ],
+          "schema": [
+            {
+              "id": "Incident ID",
+              "displayName": "Incident ID",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "Application",
+              "displayName": "Application",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "Environment",
+              "displayName": "Environment",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "Service Name",
+              "displayName": "Service Name",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "Endpoint",
+              "displayName": "Endpoint",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "Status",
+              "displayName": "Status",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "Severity",
+              "displayName": "Severity",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "Downtime Start",
+              "displayName": "Downtime Start",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "Recovery Time",
+              "displayName": "Recovery Time",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "Downtime Seconds",
+              "displayName": "Downtime Seconds",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": " Retry Count",
+              "displayName": " Retry Count",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "HTTP Status",
+              "displayName": "HTTP Status",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "Response Time Ms",
+              "displayName": "Response Time Ms",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "Failure Reason",
+              "displayName": "Failure Reason",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": " HTTP Response",
+              "displayName": " HTTP Response",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": " Workflow Execution ID",
+              "displayName": " Workflow Execution ID",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            }
+          ],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.5,
+      "position": [
+        1280,
+        2400
+      ],
+      "id": "cf666094-bb51-46f5-94d0-1d7ce049fa4b",
+      "name": "API 11b - Upsert Incident Resolution",
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "MJv8r8KlvPbAtJGG",
+          "name": "Google Sheets account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{\n  {\n    success: true,\n    message: \"Incident resolved successfully\",\n    incidentId: $json[\"Incident ID\"],\n    status: $json[\"Status\"],\n    recoveryTime: $json[\"Recovery Time\"],\n    downtimeSeconds: $json[\"Downtime Seconds\"],\n    workflowExecutionId:\n      $json[\"Workflow Execution ID\"] ||\n      $json[\" Workflow Execution ID\"]\n  }\n}}",
+        "options": {
+          "responseCode": 200
+        }
+      },
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [
+        1552,
+        2400
+      ],
+      "id": "cddcbe3c-e08c-415a-889d-1af4ddc1f143",
+      "name": "API 11c - Respond incidents-resolve",
+      "notes": "Marks an incident RESOLVED in Downtime_Incidents."
+    },
+    {
+      "parameters": {
+        "content": "## VWO QA Dashboard API\n\nThis workflow is the API layer used by the Vercel/Next.js dashboard.\n\n### Before activating\n1. Replace `REPLACE_WITH_SPREADSHEET_ID` in every Google Sheets node.\n2. Attach the same Google Sheets credential to every Google Sheets node.\n3. Import `01_VWO_Downtime_Monitor.json`.\n4. Open `API 08c - Run Monitoring Workflow` and select the imported monitor workflow from the list.\n5. Activate this API workflow.\n\n### Endpoints\n- GET `/health-status`\n- GET `/health-checks`\n- GET `/logs`\n- GET `/response-times`\n- GET `/uptime`\n- GET `/incidents`\n- GET `/retry-history`\n- POST `/health-check`\n- GET `/settings`\n- POST `/settings-write`\n- POST `/incidents-resolve`\n\nThe monitor workflow writes:\n- `Health_Check_History`\n- `Downtime_Incidents`\n- `Daily_Availability`\n\nThe API workflow reads those sheets and returns dashboard-friendly JSON.\n",
+        "height": 640,
+        "width": 460,
+        "color": 4
+      },
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        0,
+        0
+      ],
+      "id": "ab1d358e-1f7d-45eb-b393-c1057d605a7f",
+      "name": "README - Dashboard API"
+    },
+    {
+      "parameters": {
+        "jsCode": "const items = $input.all();\n\nconst updatedSettings = items.map(item => ({\n  key: item.json.Key,\n  value: item.json.Value,\n}));\n\nreturn [\n  {\n    json: {\n      success: true,\n      message: `${updatedSettings.length} settings updated successfully`,\n      updatedCount: updatedSettings.length,\n      settings: updatedSettings,\n    },\n  },\n];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1504,
+        2160
+      ],
+      "id": "70bec156-e9f0-459d-ad28-1e16adf91df6",
+      "name": "API 10c - Build API Response"
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "const body = $json.body || $json;\n\nconst incidentId =\n  body.incidentId ||\n  body[\"Incident ID\"];\n\nif (!incidentId) {\n  throw new Error(\"incidentId is required\");\n}\n\nreturn {\n  json: {\n    incidentId,\n    resolvedBy: body.resolvedBy || \"manual\",\n    resolutionNotes: body.resolutionNotes || \"\"\n  }\n};"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        496,
+        2400
+      ],
+      "id": "f283a01b-af95-416b-9f67-c2619477e8d9",
+      "name": "API 11a - Extract Incident ID"
+    },
+    {
+      "parameters": {
+        "documentId": {
+          "__rl": true,
+          "value": "1vbA3hmYYne6XiLtcZp2CnX7SMFBjKFosoMMz73qm8Xg",
+          "mode": "list",
+          "cachedResultName": "सोलर पैनल सूचना माध्यमिक शिक्षा विभाग जनपद गाजियाबाद",
+          "cachedResultUrl": "https://docs.google.com/spreadsheets/d/1vbA3hmYYne6XiLtcZp2CnX7SMFBjKFosoMMz73qm8Xg/edit?usp=drivesdk"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": 1127707547,
+          "mode": "list",
+          "cachedResultName": "Downtime_Incidents",
+          "cachedResultUrl": "https://docs.google.com/spreadsheets/d/1vbA3hmYYne6XiLtcZp2CnX7SMFBjKFosoMMz73qm8Xg/edit#gid=1127707547"
+        },
+        "filtersUI": {
+          "values": [
+            {
+              "lookupColumn": "Incident ID",
+              "lookupValue": "={{ $('API 11a - Extract Incident ID').item.json.incidentId }}"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.7,
+      "position": [
+        720,
+        2400
+      ],
+      "id": "7e0bee7e-47d1-4f83-ae9b-e17984f3545e",
+      "name": "API 11b - Find Incident",
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "MJv8r8KlvPbAtJGG",
+          "name": "Google Sheets account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "const x = $json;\n\nconst incidentId = x[\"Incident ID\"];\nconst downtimeStartRaw = x[\"Downtime Start\"];\n\nif (!incidentId) {\n  throw new Error(\"Incident ID not found\");\n}\n\nif (!downtimeStartRaw) {\n  throw new Error(\n    `Downtime Start not found for incident ${incidentId}`\n  );\n}\n\n// Parse format:\n// YYYY-MM-DD H:mm:ss\n// or\n// YYYY-MM-DD HH:mm:ss\n\nfunction parseSheetDateTime(value) {\n  const str = String(value).trim();\n\n  const match = str.match(\n    /^(\\d{4})-(\\d{2})-(\\d{2})\\s+(\\d{1,2}):(\\d{2}):(\\d{2})$/\n  );\n\n  if (!match) {\n    throw new Error(`Unsupported Downtime Start format: ${str}`);\n  }\n\n  const [, year, month, day, hour, minute, second] = match;\n\n  return new Date(\n    Number(year),\n    Number(month) - 1,\n    Number(day),\n    Number(hour),\n    Number(minute),\n    Number(second)\n  );\n}\n\nconst downtimeStart = parseSheetDateTime(downtimeStartRaw);\n\nif (Number.isNaN(downtimeStart.getTime())) {\n  throw new Error(\n    `Invalid Downtime Start: ${downtimeStartRaw}`\n  );\n}\n\nconst recoveryDate = new Date();\n\nconst downtimeSeconds = Math.max(\n  0,\n  Math.floor(\n    (recoveryDate.getTime() - downtimeStart.getTime()) / 1000\n  )\n);\n\nfunction formatDateTime(date) {\n  const pad = (n) => String(n).padStart(2, \"0\");\n\n  return (\n    `${date.getFullYear()}-` +\n    `${pad(date.getMonth() + 1)}-` +\n    `${pad(date.getDate())} ` +\n    `${pad(date.getHours())}:` +\n    `${pad(date.getMinutes())}:` +\n    `${pad(date.getSeconds())}`\n  );\n}\n\nreturn {\n  json: {\n    ...x,\n\n    \"Status\": \"RESOLVED\",\n\n    \"Recovery Time\":\n      formatDateTime(recoveryDate),\n\n    \"Downtime Seconds\":\n      downtimeSeconds,\n\n    \"Workflow Execution ID\":\n      String($execution.id)\n  }\n};"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        880,
+        2400
+      ],
+      "id": "f3758556-2cff-4d80-a45b-7a56cd88955c",
+      "name": "API 11c - Build Resolution Row"
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "API 01 - GET health-status": {
+      "main": [
+        [
+          {
+            "node": "API 01a - Read Health Check History",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "API 01a - Read Health Check History": {
+      "main": [
+        [
+          {
+            "node": "API 01b - Build Services + Summary",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "API 01b - Build Services + Summary": {
+      "main": [
+        [
+          {
+            "node": "API 01c - Respond health-status",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "API 02 - GET health-checks": {
+      "main": [
+        [
+          {
+            "node": "API 02a - Read Health Check History",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "API 02a - Read Health Check History": {
+      "main": [
+        [
+          {
+            "node": "API 02b - Map Health Checks",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "API 02b - Map Health Checks": {
+      "main": [
+        [
+          {
+            "node": "API 02c - Respond health-checks",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "API 03 - GET logs": {
+      "main": [
+        [
+          {
+            "node": "API 03a - Read Health Check History",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "API 03a - Read Health Check History": {
+      "main": [
+        [
+          {
+            "node": "API 03b - Map Log Entries",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "API 03b - Map Log Entries": {
+      "main": [
+        [
+          {
+            "node": "API 03c - Respond logs",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "API 04 - GET response-times": {
+      "main": [
+        [
+          {
+            "node": "API 04a - Read Health Check History",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "API 04a - Read Health Check History": {
+      "main": [
+        [
+          {
+            "node": "API 04b - Map Response Times",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "API 04b - Map Response Times": {
+      "main": [
+        [
+          {
+            "node": "API 04c - Respond response-times",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "API 05 - GET uptime": {
+      "main": [
+        [
+          {
+            "node": "API 05a - Read Daily Availability",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "API 05a - Read Daily Availability": {
+      "main": [
+        [
+          {
+            "node": "API 05b - Map Uptime",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "API 05b - Map Uptime": {
+      "main": [
+        [
+          {
+            "node": "API 05c - Respond uptime",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "API 06 - GET incidents": {
+      "main": [
+        [
+          {
+            "node": "API 06a - Read Downtime Incidents",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "API 06a - Read Downtime Incidents": {
+      "main": [
+        [
+          {
+            "node": "API 06b - Map Incidents",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "API 06b - Map Incidents": {
+      "main": [
+        [
+          {
+            "node": "API 06c - Respond incidents",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "API 07 - GET retry-history": {
+      "main": [
+        [
+          {
+            "node": "API 07a - Read Downtime Incidents",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "API 07a - Read Downtime Incidents": {
+      "main": [
+        [
+          {
+            "node": "API 07b - Derive Retry Attempts",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "API 07b - Derive Retry Attempts": {
+      "main": [
+        [
+          {
+            "node": "API 07c - Respond retry-history",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "API 08 - POST health-check": {
+      "main": [
+        [
+          {
+            "node": "API 08a - Acknowledge Health Check",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "API 08a - Acknowledge Health Check": {
+      "main": [
+        [
+          {
+            "node": "API 08b - Respond health-check",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "API 08b - Respond health-check": {
+      "main": [
+        [
+          {
+            "node": "API 08c - Run Monitoring Workflow",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "API 09 - GET settings": {
+      "main": [
+        [
+          {
+            "node": "API 09a - Read Settings Sheet",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "API 09a - Read Settings Sheet": {
+      "main": [
+        [
+          {
+            "node": "API 09b - Build Settings",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "API 09b - Build Settings": {
+      "main": [
+        [
+          {
+            "node": "API 09c - Respond settings",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "API 10 - POST settings": {
+      "main": [
+        [
+          {
+            "node": "API 10a - Normalise Settings Rows",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "API 10a - Normalise Settings Rows": {
+      "main": [
+        [
+          {
+            "node": "API 10b - Upsert Settings",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "API 10b - Upsert Settings": {
+      "main": [
+        [
+          {
+            "node": "API 10c - Build API Response",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "API 11 - POST incidents-resolve": {
+      "main": [
+        [
+          {
+            "node": "API 11a - Extract Incident ID",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "API 11b - Upsert Incident Resolution": {
+      "main": [
+        [
+          {
+            "node": "API 11c - Respond incidents-resolve",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "API 10c - Build API Response": {
+      "main": [
+        [
+          {
+            "node": "API 10c - Respond settings-write",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "API 11a - Extract Incident ID": {
+      "main": [
+        [
+          {
+            "node": "API 11b - Find Incident",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "API 11b - Find Incident": {
+      "main": [
+        [
+          {
+            "node": "API 11c - Build Resolution Row",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "API 11c - Build Resolution Row": {
+      "main": [
+        [
+          {
+            "node": "API 11b - Upsert Incident Resolution",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "binaryMode": "separate"
+  },
+  "versionId": "9b5438ef-65c8-4d3e-a942-5c919a97ea84",
+  "meta": {
+    "templateCredsSetupCompleted": true,
+    "instanceId": "9161cf1ee5c8e758097448556afd72c9ef4603bb9e07bbc88bd89068d7db8d86"
+  },
+  "nodeGroups": [],
+  "id": "nzpsz6Pqm4DVmOOZ",
+  "tags": []
+}

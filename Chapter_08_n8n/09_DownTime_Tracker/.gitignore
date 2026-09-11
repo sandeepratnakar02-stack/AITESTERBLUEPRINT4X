@@ -1,0 +1,20 @@
+node_modules/
+.next/
+out/
+build/
+dist/
+
+# local env
+.env
+.env.local
+.env*.local
+
+# logs / os
+*.log
+npm-debug.log*
+.DS_Store
+Thumbs.db
+
+# typescript
+*.tsbuildinfo
+next-env.d.ts

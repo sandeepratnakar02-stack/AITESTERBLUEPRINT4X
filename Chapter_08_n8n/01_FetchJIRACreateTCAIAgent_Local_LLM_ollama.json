@@ -1,0 +1,145 @@
+{
+  "name": "01_FetchJIRACreateTCAIAgent_Local_LLM_ollama",
+  "nodes": [
+    {
+      "parameters": {
+        "options": {}
+      },
+      "type": "@n8n/n8n-nodes-langchain.chatTrigger",
+      "typeVersion": 1.4,
+      "position": [
+        -336,
+        -32
+      ],
+      "id": "6c40972b-b85a-480c-8bf7-86561297ca1c",
+      "name": "When chat message received",
+      "webhookId": "04d3c0f5-65a2-4272-9736-d32c36be8893"
+    },
+    {
+      "parameters": {
+        "options": {}
+      },
+      "type": "@n8n/n8n-nodes-langchain.agent",
+      "typeVersion": 3.1,
+      "position": [
+        -96,
+        -80
+      ],
+      "id": "c0e85065-059c-4c94-bafb-2a7f482858b2",
+      "name": "AI Agent",
+      "notes": "You have to take the JIRA id and fetch from the JIRA Tool the issue with id and create the Test Plan for it."
+    },
+    {
+      "parameters": {
+        "model": "llama3.2:latest",
+        "options": {}
+      },
+      "type": "@n8n/n8n-nodes-langchain.lmChatOllama",
+      "typeVersion": 1,
+      "position": [
+        -192,
+        144
+      ],
+      "id": "ac2ee50b-924e-4a6b-aa0a-fd1aca8fb289",
+      "name": "Ollama Chat Model",
+      "credentials": {
+        "ollamaApi": {
+          "id": "eBHsBCSt0AcV4kIv",
+          "name": "Ollama account"
+        }
+      }
+    },
+    {
+      "parameters": {},
+      "type": "@n8n/n8n-nodes-langchain.memoryBufferWindow",
+      "typeVersion": 1.4,
+      "position": [
+        -64,
+        128
+      ],
+      "id": "c77bbc84-ea5b-4e03-b083-6696629ec9ee",
+      "name": "Simple Memory"
+    },
+    {
+      "parameters": {
+        "operation": "get",
+        "issueKey": "={{ /*n8n-auto-generated-fromAI-override*/ $fromAI('Issue_Key', ``, 'string') }}",
+        "additionalFields": {}
+      },
+      "type": "n8n-nodes-base.jiraTool",
+      "typeVersion": 1,
+      "position": [
+        112,
+        112
+      ],
+      "id": "88d9ad9f-9cbd-4d4b-88ef-d64b292ecb8a",
+      "name": "Get an issue in Jira Software",
+      "credentials": {
+        "jiraSoftwareCloudApi": {
+          "id": "V5N0dmzYqpcnM9YV",
+          "name": "Jira SW Cloud account"
+        }
+      }
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "When chat message received": {
+      "main": [
+        [
+          {
+            "node": "AI Agent",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Ollama Chat Model": {
+      "ai_languageModel": [
+        [
+          {
+            "node": "AI Agent",
+            "type": "ai_languageModel",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Simple Memory": {
+      "ai_memory": [
+        [
+          {
+            "node": "AI Agent",
+            "type": "ai_memory",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get an issue in Jira Software": {
+      "ai_tool": [
+        [
+          {
+            "node": "AI Agent",
+            "type": "ai_tool",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "binaryMode": "separate"
+  },
+  "versionId": "7b066378-8ad3-425c-a7c5-b37955fcf635",
+  "meta": {
+    "templateCredsSetupCompleted": true,
+    "instanceId": "a5cb8043d018148566c3e9cdd91d93e15643d8d62a75b0da41e7a4bfd7a697fa"
+  },
+  "nodeGroups": [],
+  "id": "3aP2RABgtcw2kBYK",
+  "tags": []
+}

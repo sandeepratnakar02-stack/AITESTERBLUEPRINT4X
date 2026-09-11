@@ -1,0 +1,311 @@
+{
+  "name": "08_Screenshot_To_Bug_Reporter_AIAgent",
+  "nodes": [
+    {
+      "parameters": {
+        "formTitle": "🐞 Screenshot → Jira Bug Reporter",
+        "formDescription": "Drop a screenshot of the bug below (PNG/JPG). Optionally paste error logs, then submit. An AI analyzes the image and creates a structured Bug in your QA project on Jira.",
+        "formFields": {
+          "values": [
+            {
+              "fieldLabel": "Screenshot",
+              "fieldType": "file",
+              "requiredField": true,
+              "multipleFiles": false,
+              "acceptFileTypes": ".png, .jpg, .jpeg, .gif, .webp, .bmp"
+            },
+            {
+              "fieldLabel": "Error logs (optional)",
+              "fieldType": "textarea",
+              "placeholder": "Paste stack trace / console / network errors here (optional)",
+              "requiredField": false
+            }
+          ]
+        },
+        "responseMode": "lastNode",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.formTrigger",
+      "typeVersion": 2.3,
+      "position": [
+        0,
+        0
+      ],
+      "id": "5f8c1a0e-3b2d-4c6e-9a1f-8d4b7c2e6f01",
+      "name": "Screenshot to Bug Form",
+      "webhookId": "5f8c1a0e-3b2d-4c6e-9a1f-8d4b7c2e6f01"
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "language": "javaScript",
+        "jsCode": "const items = $input.all();\nconst out = [];\nfor (const item of items) {\n  const binKeys = Object.keys(item.binary || {});\n  if (binKeys.length === 0) {\n    throw new Error('No screenshot file received. Please upload an image.');\n  }\n  const file = item.binary[binKeys[0]];\n  const mime = (file.mimeType || 'image/png').toLowerCase();\n  if (mime.indexOf('image/') !== 0) {\n    throw new Error('Uploaded file is not an image (detected type: ' + mime + ').');\n  }\n  const b64 = file.data || '';\n  const approxBytes = Math.round((b64.length / 4) * 3);\n  if (approxBytes > 19 * 1024 * 1024) {\n    throw new Error('Screenshot is larger than 19 MB. Groq accepts up to 20 MB per image. Please upload a smaller image.');\n  }\n  let errorLogs = '';\n  const json = item.json || {};\n  for (const key of Object.keys(json)) {\n    const value = json[key];\n    if (typeof value === 'string' && value.trim() !== '' && key !== 'submittedAt' && key !== 'headers') {\n      errorLogs = value;\n      break;\n    }\n  }\n  const ext = (mime.split('/')[1] || 'png').replace('jpeg', 'jpg');\n  const fileName = file.fileName || ('screenshot.' + ext);\n  const imageB64 = b64;\n  const dataUri = 'data:' + mime + ';base64,' + b64;\n  const SYSTEM_PROMPT = [\n    'You are a meticulous senior QA engineer. A tester uploads a screenshot of a UI bug',\n    'and optionally some error logs. Analyze the image carefully and produce a complete',\n    'bug report as JSON ONLY (no markdown fences, no extra text).',\n    'Return valid JSON with EXACTLY these keys:',\n    '  summary          : string  - concise bug title (max ~12 words).',\n    '  severity         : string  - one of Blocker, Critical, Major, Minor, Trivial.',\n    '  component        : string  - the UI area or feature most likely affected, or null if unclear.',\n    '  environment      : string  - browser/OS/device you can infer, or null if unclear.',\n    '  visualDetails    : string  - describe exactly what is visibly wrong: layout, colors, missing or wrong text.',\n    '  expectedBehavior : string  - what should have happened.',\n    '  actualBehavior   : string  - what actually happened.',\n    '  stepsToReproduce : array of strings - ordered, concrete steps (3 to 6).',\n    '  errorLogs        : string  - the logs pasted by the tester, or null if none.',\n    'Do NOT invent details that are not visible in the screenshot. Quote any on-screen error text verbatim.'\n  ].join('\\n');\n  const logSection = errorLogs.trim() !== '' ? (' Error logs provided by tester:\\n' + errorLogs) : '';\n  const USER_PROMPT = 'Analyze this UI screenshot and write the bug report as JSON.' + logSection;\n  out.push({\n    json: {\n      fileName: fileName,\n      mimeType: mime,\n      imageB64: imageB64,\n      dataUri: dataUri,\n      errorLogs: errorLogs,\n      GROQ_MODEL: 'qwen/qwen3.6-27b',\n      JIRA_BASE_URL: 'https://YOUR-DOMAIN.atlassian.net',\n      SYSTEM_PROMPT: SYSTEM_PROMPT,\n      USER_PROMPT: USER_PROMPT\n    }\n  });\n}\nreturn out;"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        260,
+        0
+      ],
+      "id": "6a9d2b1f-4c3e-4d7f-8b20-9e5c8d3f7a02",
+      "name": "Prepare Screenshot"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.groq.com/openai/v1/chat/completions",
+        "sendHeaders": false,
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "{\n  \"model\": {{ JSON.stringify($json.GROQ_MODEL) }},\n  \"temperature\": 0.2,\n  \"response_format\": { \"type\": \"json_object\" },\n  \"messages\": [\n    { \"role\": \"system\", \"content\": {{ JSON.stringify($json.SYSTEM_PROMPT) }} },\n    { \"role\": \"user\", \"content\": [\n      { \"type\": \"text\", \"text\": {{ JSON.stringify($json.USER_PROMPT) }} },\n      { \"type\": \"image_url\", \"image_url\": { \"url\": {{ JSON.stringify($json.dataUri) }} } }\n    ] }\n  ]\n}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        520,
+        -140
+      ],
+      "id": "7b0e3c20-5d4f-4e80-9c31-0f6d9e4a8b03",
+      "name": "Groq Vision (analyze)",
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "",
+          "name": "Groq Header Auth"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "language": "javaScript",
+        "jsCode": "const items = $input.all();\nconst out = [];\nfor (const item of items) {\n  const json = item.json || {};\n  let content = '';\n  try {\n    content = (json.choices && json.choices[0] && json.choices[0].message && json.choices[0].message.content) || '';\n  } catch (err) {\n    throw new Error('Unexpected Groq response shape.');\n  }\n  if (content === '') {\n    throw new Error('Groq returned an empty answer. ' + JSON.stringify(json));\n  }\n  let bug = null;\n  try {\n    bug = JSON.parse(content);\n  } catch (err) {\n    throw new Error('AI did not return valid JSON. Got: ' + content.slice(0, 300));\n  }\n  const steps = Array.isArray(bug.stepsToReproduce) ? bug.stepsToReproduce : [];\n  const summary = (bug.summary || 'Bug reported from screenshot').trim();\n  const adf = { version: 1, type: 'doc', content: [] };\n  function textPara(text) {\n    return { type: 'paragraph', content: [{ type: 'text', text: String(text || '') }] };\n  }\n  function heading(level, text) {\n    return { type: 'heading', attrs: { level: level }, content: [{ type: 'text', text: String(text || '') }] };\n  }\n  function rule() {\n    return { type: 'rule' };\n  }\n  adf.content.push(heading(1, summary));\n  adf.content.push(rule());\n  adf.content.push(heading(2, 'Environment'));\n  adf.content.push(textPara(bug.environment || 'Not specified'));\n  adf.content.push(rule());\n  adf.content.push(heading(2, 'Visual details'));\n  adf.content.push(textPara(bug.visualDetails || 'See attached screenshot.'));\n  adf.content.push(rule());\n  adf.content.push(heading(2, 'Steps to reproduce'));\n  if (steps.length > 0) {\n    steps.forEach(function (step, idx) {\n      adf.content.push(textPara(String(idx + 1) + '. ' + String(step)));\n    });\n  } else {\n    adf.content.push(textPara('Not provided.'));\n  }\n  adf.content.push(rule());\n  adf.content.push(heading(2, 'Expected behavior'));\n  adf.content.push(textPara(bug.expectedBehavior || 'Not specified'));\n  adf.content.push(heading(2, 'Actual behavior'));\n  adf.content.push(textPara(bug.actualBehavior || 'Not specified'));\n  if (bug.errorLogs) {\n    adf.content.push(heading(2, 'Error logs'));\n    adf.content.push(textPara(String(bug.errorLogs)));\n  }\n  out.push({\n    json: {\n      summary: summary,\n      severity: bug.severity || 'Major',\n      component: bug.component || null,\n      environment: bug.environment || null,\n      stepsToReproduce: steps,\n      visualDetails: bug.visualDetails || '',\n      expectedBehavior: bug.expectedBehavior || '',\n      actualBehavior: bug.actualBehavior || '',\n      errorLogs: bug.errorLogs || '',\n      descriptionAdfJson: JSON.stringify(adf)\n    }\n  });\n}\nreturn out;"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        800,
+        -140
+      ],
+      "id": "8c1f4d31-6e50-4f91-8d42-1a7e0f5b9c04",
+      "name": "Parse Bug JSON"
+    },
+    {
+      "parameters": {
+        "jiraVersion": "cloud",
+        "resource": "issue",
+        "operation": "create",
+        "project": {
+          "mode": "list",
+          "value": "REPLACE_WITH_YOUR_QA_PROJECT_ID"
+        },
+        "issueType": {
+          "mode": "list",
+          "value": "REPLACE_WITH_BUG_ISSUE_TYPE_ID"
+        },
+        "summary": "={{ $json.summary }}",
+        "additionalFields": {
+          "description": "={{ JSON.parse($json.descriptionAdfJson) }}"
+        }
+      },
+      "type": "n8n-nodes-base.jira",
+      "typeVersion": 1,
+      "position": [
+        1080,
+        -140
+      ],
+      "id": "9d20e542-7f61-4a02-8e53-2b8f10a6cd05",
+      "name": "Create Jira Bug",
+      "credentials": {
+        "jiraSoftwareCloudApi": {
+          "id": "",
+          "name": "Jira SW Cloud account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "mode": "combine",
+        "combinationMode": "combine",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.merge",
+      "typeVersion": 3,
+      "position": [
+        1320,
+        -140
+      ],
+      "id": "0e31f653-8072-4b13-8f64-3c9021b7de06",
+      "name": "Merge (key + screenshot)"
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "language": "javaScript",
+        "jsCode": "const items = $input.all();\nconst out = [];\nfor (const item of items) {\n  const json = item.json || {};\n  const issueKey = json.key || '';\n  if (issueKey === '') {\n    throw new Error('Could not read the created issue key from Jira.');\n  }\n  const base = json.JIRA_BASE_URL || 'https://your-domain.atlassian.net';\n  const issueUrl = base + '/browse/' + issueKey;\n  out.push({\n    json: {\n      issueKey: issueKey,\n      issueUrl: issueUrl,\n      message: 'Bug created in Jira: ' + issueKey\n    },\n    binary: {\n      data: {\n        data: json.imageB64 || '',\n        mimeType: json.mimeType || 'image/png',\n        fileName: json.fileName || 'screenshot.png'\n      }\n    }\n  });\n}\nreturn out;"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1560,
+        -40
+      ],
+      "id": "1f420764-9183-4c24-9075-4da132c8ef07",
+      "name": "Build Attachment Payload"
+    },
+    {
+      "parameters": {
+        "jiraVersion": "cloud",
+        "resource": "issueAttachment",
+        "operation": "add",
+        "issueKey": "={{ $json.issueKey }}",
+        "binaryPropertyName": "data"
+      },
+      "type": "n8n-nodes-base.jira",
+      "typeVersion": 1,
+      "position": [
+        1800,
+        -140
+      ],
+      "id": "20531875-a294-4d35-a186-5eb243d9f008",
+      "name": "Attach Screenshot to Bug",
+      "credentials": {
+        "jiraSoftwareCloudApi": {
+          "id": "",
+          "name": "Jira SW Cloud account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "mode": "combine",
+        "combinationMode": "combine",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.merge",
+      "typeVersion": 3,
+      "position": [
+        2040,
+        -140
+      ],
+      "id": "31642986-b3a5-4e46-b297-6fc354ea0109",
+      "name": "Form Result Summary"
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "Screenshot to Bug Form": {
+      "main": [
+        [
+          {
+            "node": "Prepare Screenshot",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prepare Screenshot": {
+      "main": [
+        [
+          {
+            "node": "Groq Vision (analyze)",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Merge (key + screenshot)",
+            "type": "main",
+            "index": 1
+          }
+        ]
+      ]
+    },
+    "Groq Vision (analyze)": {
+      "main": [
+        [
+          {
+            "node": "Parse Bug JSON",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse Bug JSON": {
+      "main": [
+        [
+          {
+            "node": "Create Jira Bug",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Create Jira Bug": {
+      "main": [
+        [
+          {
+            "node": "Merge (key + screenshot)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Merge (key + screenshot)": {
+      "main": [
+        [
+          {
+            "node": "Build Attachment Payload",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Attachment Payload": {
+      "main": [
+        [
+          {
+            "node": "Attach Screenshot to Bug",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Form Result Summary",
+            "type": "main",
+            "index": 1
+          }
+        ]
+      ]
+    },
+    "Attach Screenshot to Bug": {
+      "main": [
+        [
+          {
+            "node": "Form Result Summary",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "binaryMode": "separate"
+  },
+  "versionId": "b1a2c3d4-e5f6-4a7b-8c9d-0e1f2a3b4c5d",
+  "meta": {
+    "templateCredsSetupCompleted": false,
+    "instanceId": "import-new-workflow"
+  },
+  "nodeGroups": [],
+  "id": "08ScreenshotToBug",
+  "tags": []
+}

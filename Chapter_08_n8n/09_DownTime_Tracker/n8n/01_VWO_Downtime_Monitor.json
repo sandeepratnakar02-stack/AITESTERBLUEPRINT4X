@@ -1,0 +1,1208 @@
+{
+  "name": "01_VWO_Downtime_Monitor",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "minutes",
+              "minutesInterval": 5
+            }
+          ]
+        }
+      },
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        304,
+        192
+      ],
+      "id": "89a1cd0e-6c1f-49ca-91b9-1c12c73350e1",
+      "name": "01 - Scheduled Monitor"
+    },
+    {
+      "parameters": {
+        "workflowInputs": {
+          "values": [
+            {
+              "name": "environment"
+            }
+          ]
+        }
+      },
+      "type": "n8n-nodes-base.executeWorkflowTrigger",
+      "typeVersion": 1.1,
+      "position": [
+        304,
+        368
+      ],
+      "id": "a8e08d9c-070a-419d-8a95-4f685f7a1085",
+      "name": "02 - Called By API Workflow"
+    },
+    {
+      "parameters": {
+        "jsCode": "// =============================================\n// Read runtime settings from Google Sheets\n// =============================================\n\nconst rows = $input.all().map(item => item.json);\n\nconst settings = {\n  environment: 'QA',\n  responseTimeThresholdMs: 3000,\n  retryCount: 2,\n  retryDelayMs: 5000,\n  retryDelayMs2: 30000,\n  application: 'VWO'\n};\n\nfor (const row of rows) {\n  const key = String(row.Key || '').trim();\n  const rawValue = row.Value;\n\n  if (!key) {\n    continue;\n  }\n\n  switch (key) {\n    case 'environment':\n      settings.environment = String(rawValue || 'QA');\n      break;\n\n    case 'responseTimeThresholdMs':\n      settings.responseTimeThresholdMs =\n        Number(rawValue) || 3000;\n      break;\n\n    case 'retryCount':\n      settings.retryCount =\n        Number.isFinite(Number(rawValue))\n          ? Number(rawValue)\n          : 2;\n      break;\n\n    case 'retryDelayMs':\n      settings.retryDelayMs =\n        Number(rawValue) || 5000;\n      break;\n\n    case 'retryDelayMs2':\n      settings.retryDelayMs2 =\n        Number(rawValue) || 30000;\n      break;\n\n    case 'application':\n      settings.application =\n        String(rawValue || 'VWO');\n      break;\n  }\n}\n\n\n// =============================================\n// Get environment supplied by API, if any\n// =============================================\n\nlet requestedEnvironment = '';\n\ntry {\n  requestedEnvironment =\n    $('02A - Resolve Monitor Context')\n      .first()\n      .json\n      .requestedEnvironment || '';\n} catch (e) {\n  requestedEnvironment = '';\n}\n\n\n// API environment takes priority.\n// Otherwise use Settings sheet.\n// Otherwise QA.\nconst environment =\n  requestedEnvironment ||\n  settings.environment ||\n  'QA';\n\n\n// =============================================\n// Current workflow supports maximum 2 retries\n// initial attempt + retry #2 + retry #3\n// =============================================\n\nconst configuredRetryCount = Math.min(\n  Math.max(Number(settings.retryCount) || 0, 0),\n  2\n);\n\n\n// =============================================\n// Services\n// =============================================\n\nconst services = [\n  {\n    application: settings.application,\n    environment,\n    serviceName: 'VWO Main Application',\n    checkType: 'HTTP',\n    url: 'https://app.vwo.com/',\n    method: 'GET',\n    expectedStatus: 200,\n    expectedText: '',\n    critical: true\n  },\n\n  {\n    application: settings.application,\n    environment,\n    serviceName: 'VWO Login',\n    checkType: 'HTTP',\n    url: 'https://app.vwo.com/',\n    method: 'GET',\n    expectedStatus: 200,\n    expectedText: '',\n    critical: true\n  },\n\n  {\n    application: settings.application,\n    environment,\n    serviceName: 'VWO Campaign Dashboard',\n    checkType: 'HTTP',\n    url: 'https://app.vwo.com/',\n    method: 'GET',\n    expectedStatus: 200,\n    expectedText: '',\n    critical: false\n  },\n\n  {\n    application: settings.application,\n    environment,\n    serviceName: 'VWO API',\n    checkType: 'HTTP',\n    url: 'https://app.vwo.com/',\n    method: 'GET',\n    expectedStatus: 200,\n    expectedText: '',\n    critical: true\n  },\n\n  {\n    application: settings.application,\n    environment,\n    serviceName: 'VWO Editor',\n    checkType: 'HTTP',\n    url: 'https://app.vwo.com/',\n    method: 'GET',\n    expectedStatus: 200,\n    expectedText: '',\n    critical: false\n  }\n];\n\n\n// =============================================\n// Return one n8n item per service\n// =============================================\n\nreturn services.map(service => ({\n  json: {\n    ...service,\n\n    responseTimeThresholdMs:\n      settings.responseTimeThresholdMs,\n\n    retryDelayMs:\n      settings.retryDelayMs,\n\n    retryDelayMs2:\n      settings.retryDelayMs2,\n\n    configuredRetryCount,\n\n    attempt: 1,\n\n    maxAttempts:\n      configuredRetryCount + 1\n  }\n}));"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1008,
+        272
+      ],
+      "id": "650e2580-24b3-42d9-91c5-ba4e459a44d6",
+      "name": "03 - Build Service Checks"
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "const cfg = $json;\nconst started = Date.now();\n\nlet httpStatus = null;\nlet body = '';\nlet errorMessage = '';\nlet rawError = '';\n\nfunction safeStringify(value) {\n  try {\n    return JSON.stringify(value);\n  } catch {\n    return String(value);\n  }\n}\n\nfunction extractErrorMessage(error) {\n  if (!error) {\n    return 'Unknown HTTP request error';\n  }\n\n  // Clean DNS error\n  if (error.code === 'ENOTFOUND') {\n    return `DNS lookup failed: ${error.hostname || 'unknown host'}`;\n  }\n\n  // Clean timeout error\n  if (\n    error.code === 'ETIMEDOUT' ||\n    error.code === 'ESOCKETTIMEDOUT'\n  ) {\n    return 'Request timed out';\n  }\n\n  // Connection refused\n  if (error.code === 'ECONNREFUSED') {\n    return `Connection refused${\n      error.address ? `: ${error.address}` : ''\n    }`;\n  }\n\n  // Connection reset\n  if (error.code === 'ECONNRESET') {\n    return 'Connection reset by remote server';\n  }\n\n  // Normal error message\n  if (\n    typeof error.message === 'string' &&\n    error.message.trim()\n  ) {\n    return error.message;\n  }\n\n  // Sometimes message itself is an object\n  if (\n    error.message &&\n    typeof error.message === 'object'\n  ) {\n    if (\n      typeof error.message.message === 'string' &&\n      error.message.message.trim()\n    ) {\n      return error.message.message;\n    }\n\n    return safeStringify(error.message);\n  }\n\n  // Nested error.message\n  if (\n    typeof error.error?.message === 'string' &&\n    error.error.message.trim()\n  ) {\n    return error.error.message;\n  }\n\n  // Nested cause.message\n  if (\n    typeof error.cause?.message === 'string' &&\n    error.cause.message.trim()\n  ) {\n    return error.cause.message;\n  }\n\n  // Response body message\n  if (\n    typeof error.response?.body?.message === 'string' &&\n    error.response.body.message.trim()\n  ) {\n    return error.response.body.message;\n  }\n\n  // Response body error\n  if (\n    typeof error.response?.body?.error === 'string' &&\n    error.response.body.error.trim()\n  ) {\n    return error.response.body.error;\n  }\n\n  return safeStringify(error);\n}\n\ntry {\n  const response = await this.helpers.httpRequest({\n    method: cfg.method || 'GET',\n    url: cfg.url,\n    timeout: 10000,\n    returnFullResponse: true,\n    ignoreHttpStatusErrors: true,\n    encoding: 'text'\n  });\n\n  httpStatus =\n    Number(\n      response.statusCode ||\n      response.status ||\n      0\n    ) || null;\n\n  if (typeof response.body === 'string') {\n    body = response.body;\n  } else if (\n    response.body !== undefined &&\n    response.body !== null\n  ) {\n    body = safeStringify(response.body);\n  }\n\n} catch (e) {\n\n  errorMessage = extractErrorMessage(e);\n  rawError = safeStringify(e);\n\n  httpStatus =\n    Number(\n      e?.statusCode ||\n      e?.status ||\n      e?.response?.statusCode ||\n      e?.response?.status ||\n      0\n    ) || null;\n\n  const errorBody =\n    e?.response?.body ??\n    e?.body ??\n    '';\n\n  if (typeof errorBody === 'string') {\n    body = errorBody;\n  } else if (errorBody) {\n    body = safeStringify(errorBody);\n  }\n}\n\nconst responseTimeMs = Date.now() - started;\n\nconst expectedStatus =\n  Number(cfg.expectedStatus || 200);\n\nconst threshold =\n  Number(cfg.responseTimeThresholdMs || 3000);\n\nconst expectedText =\n  String(cfg.expectedText || '');\n\nlet healthStatus = 'UP';\nlet functionalValidation = 'NOT_APPLICABLE';\n\n// HTTP/network failure\nif (\n  !httpStatus ||\n  httpStatus !== expectedStatus\n) {\n  healthStatus = 'DOWN';\n  functionalValidation = 'NOT_APPLICABLE';\n}\n\n// HTTP succeeded but functional validation failed\nelse if (\n  expectedText &&\n  !body.includes(expectedText)\n) {\n  healthStatus = 'FUNCTIONAL_FAILURE';\n  functionalValidation = 'FAIL';\n}\n\n// Functional validation passed\nelse if (expectedText) {\n  functionalValidation = 'PASS';\n\n  if (responseTimeMs > threshold) {\n    healthStatus = 'DEGRADED';\n  }\n}\n\n// No functional text check, only response-time check\nelse if (responseTimeMs > threshold) {\n  healthStatus = 'DEGRADED';\n}\n\nreturn {\n  json: {\n    ...cfg,\n\n    attempt: 1,\n\n    httpStatus,\n    responseTimeMs,\n\n    healthStatus,\n    functionalValidation,\n\n    errorMessage,\n    rawError,\n\n    checkedAt: new Date().toISOString(),\n\n    responseSnippet:\n      typeof body === 'string'\n        ? body.slice(0, 500)\n        : ''\n  }\n};"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1280,
+        272
+      ],
+      "id": "f6c1c340-3940-4762-a8d3-d78eb3a0f948",
+      "name": "04 - Initial Health Check"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "f41fc931-6132-4406-83b0-90f9e1997fb1",
+              "leftValue": "={{\n  ['DOWN', 'FUNCTIONAL_FAILURE'].includes($json.healthStatus)\n  &&\n  Number($json.configuredRetryCount ?? 2) >= 1\n}}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        1536,
+        272
+      ],
+      "id": "aaeb2370-bbd0-4f36-b217-02a34bce16c1",
+      "name": "05 - Retry Needed?"
+    },
+    {
+      "parameters": {
+        "amount": "={{ Number($json.retryDelayMs || 5000) / 1000 }}"
+      },
+      "type": "n8n-nodes-base.wait",
+      "typeVersion": 1.1,
+      "position": [
+        1792,
+        192
+      ],
+      "id": "92755c29-3c70-449d-8c38-4be362c2ba40",
+      "name": "06 - Wait 20 Seconds",
+      "webhookId": "3ef0093a-8c51-4263-94cf-5c6310b66c91"
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "const cfg = $json;\nconst started = Date.now();\n\nlet httpStatus = null;\nlet body = '';\nlet errorMessage = '';\nlet rawError = '';\n\nfunction safeStringify(value) {\n  try {\n    return JSON.stringify(value);\n  } catch {\n    return String(value);\n  }\n}\n\nfunction extractErrorMessage(error) {\n  if (!error) {\n    return 'Unknown HTTP request error';\n  }\n\n  if (error.code === 'ENOTFOUND') {\n    return `DNS lookup failed: ${error.hostname || 'unknown host'}`;\n  }\n\n  if (\n    error.code === 'ETIMEDOUT' ||\n    error.code === 'ESOCKETTIMEDOUT'\n  ) {\n    return 'Request timed out';\n  }\n\n  if (error.code === 'ECONNREFUSED') {\n    return `Connection refused${\n      error.address ? `: ${error.address}` : ''\n    }`;\n  }\n\n  if (error.code === 'ECONNRESET') {\n    return 'Connection reset by remote server';\n  }\n\n  if (\n    typeof error.message === 'string' &&\n    error.message.trim()\n  ) {\n    return error.message;\n  }\n\n  if (\n    error.message &&\n    typeof error.message === 'object'\n  ) {\n    if (\n      typeof error.message.message === 'string' &&\n      error.message.message.trim()\n    ) {\n      return error.message.message;\n    }\n\n    return safeStringify(error.message);\n  }\n\n  if (\n    typeof error.error?.message === 'string' &&\n    error.error.message.trim()\n  ) {\n    return error.error.message;\n  }\n\n  if (\n    typeof error.cause?.message === 'string' &&\n    error.cause.message.trim()\n  ) {\n    return error.cause.message;\n  }\n\n  if (\n    typeof error.response?.body?.message === 'string' &&\n    error.response.body.message.trim()\n  ) {\n    return error.response.body.message;\n  }\n\n  if (\n    typeof error.response?.body?.error === 'string' &&\n    error.response.body.error.trim()\n  ) {\n    return error.response.body.error;\n  }\n\n  return safeStringify(error);\n}\n\ntry {\n  const response = await this.helpers.httpRequest({\n    method: cfg.method || 'GET',\n    url: cfg.url,\n    timeout: 10000,\n    returnFullResponse: true,\n    ignoreHttpStatusErrors: true,\n    encoding: 'text'\n  });\n\n  httpStatus =\n    Number(\n      response.statusCode ||\n      response.status ||\n      0\n    ) || null;\n\n  if (typeof response.body === 'string') {\n    body = response.body;\n  } else if (\n    response.body !== undefined &&\n    response.body !== null\n  ) {\n    body = safeStringify(response.body);\n  }\n\n} catch (e) {\n\n  errorMessage = extractErrorMessage(e);\n  rawError = safeStringify(e);\n\n  httpStatus =\n    Number(\n      e?.statusCode ||\n      e?.status ||\n      e?.response?.statusCode ||\n      e?.response?.status ||\n      0\n    ) || null;\n\n  const errorBody =\n    e?.response?.body ??\n    e?.body ??\n    '';\n\n  if (typeof errorBody === 'string') {\n    body = errorBody;\n  } else if (errorBody) {\n    body = safeStringify(errorBody);\n  }\n}\n\nconst responseTimeMs = Date.now() - started;\n\nconst expectedStatus =\n  Number(cfg.expectedStatus || 200);\n\nconst threshold =\n  Number(cfg.responseTimeThresholdMs || 3000);\n\nconst expectedText =\n  String(cfg.expectedText || '');\n\nlet healthStatus = 'UP';\nlet functionalValidation = 'NOT_APPLICABLE';\n\nif (!httpStatus || httpStatus !== expectedStatus) {\n  healthStatus = 'DOWN';\n  functionalValidation = 'NOT_APPLICABLE';\n\n} else if (\n  expectedText &&\n  !body.includes(expectedText)\n) {\n  healthStatus = 'FUNCTIONAL_FAILURE';\n  functionalValidation = 'FAIL';\n\n} else if (expectedText) {\n  functionalValidation = 'PASS';\n\n  if (responseTimeMs > threshold) {\n    healthStatus = 'DEGRADED';\n  }\n\n} else if (responseTimeMs > threshold) {\n  healthStatus = 'DEGRADED';\n}\n\nreturn {\n  json: {\n    ...cfg,\n\n    attempt: 2,\n\n    httpStatus,\n    responseTimeMs,\n\n    healthStatus,\n    functionalValidation,\n\n    errorMessage,\n    rawError,\n\n    checkedAt: new Date().toISOString(),\n\n    responseSnippet:\n      typeof body === 'string'\n        ? body.slice(0, 500)\n        : ''\n  }\n};"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2032,
+        192
+      ],
+      "id": "b79878d2-a23b-40c0-9138-588679c16b6b",
+      "name": "07 - Retry Check #2"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "97f96b1b-2fc9-4bb5-8ae5-a4ca35f53fb1",
+              "leftValue": "={{\n  ['DOWN', 'FUNCTIONAL_FAILURE'].includes($json.healthStatus)\n  &&\n  Number($json.configuredRetryCount ?? 2) >= 2\n}}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        2272,
+        192
+      ],
+      "id": "5e940aa6-3d09-4a65-b5cd-4cd39d4c7d8e",
+      "name": "08 - Retry #2 Still Failed?"
+    },
+    {
+      "parameters": {
+        "amount": "={{ Number($json.retryDelayMs2 || 30000) / 1000 }}"
+      },
+      "type": "n8n-nodes-base.wait",
+      "typeVersion": 1.1,
+      "position": [
+        2512,
+        112
+      ],
+      "id": "01d54076-ad8a-4a79-a3ae-978ae255c262",
+      "name": "09 - Wait 30 Seconds",
+      "webhookId": "a088bf8c-9805-4950-a484-fab52637725a"
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "const cfg = $json;\nconst started = Date.now();\n\nlet httpStatus = null;\nlet body = '';\nlet errorMessage = '';\nlet rawError = '';\n\nfunction safeStringify(value) {\n  try {\n    return JSON.stringify(value);\n  } catch {\n    return String(value);\n  }\n}\n\nfunction extractErrorMessage(error) {\n  if (!error) {\n    return 'Unknown HTTP request error';\n  }\n\n  if (error.code === 'ENOTFOUND') {\n    return `DNS lookup failed: ${error.hostname || 'unknown host'}`;\n  }\n\n  if (\n    error.code === 'ETIMEDOUT' ||\n    error.code === 'ESOCKETTIMEDOUT'\n  ) {\n    return 'Request timed out';\n  }\n\n  if (error.code === 'ECONNREFUSED') {\n    return `Connection refused${\n      error.address ? `: ${error.address}` : ''\n    }`;\n  }\n\n  if (error.code === 'ECONNRESET') {\n    return 'Connection reset by remote server';\n  }\n\n  if (\n    typeof error.message === 'string' &&\n    error.message.trim()\n  ) {\n    return error.message;\n  }\n\n  if (\n    error.message &&\n    typeof error.message === 'object'\n  ) {\n    if (\n      typeof error.message.message === 'string' &&\n      error.message.message.trim()\n    ) {\n      return error.message.message;\n    }\n\n    return safeStringify(error.message);\n  }\n\n  if (\n    typeof error.error?.message === 'string' &&\n    error.error.message.trim()\n  ) {\n    return error.error.message;\n  }\n\n  if (\n    typeof error.cause?.message === 'string' &&\n    error.cause.message.trim()\n  ) {\n    return error.cause.message;\n  }\n\n  if (\n    typeof error.response?.body?.message === 'string' &&\n    error.response.body.message.trim()\n  ) {\n    return error.response.body.message;\n  }\n\n  if (\n    typeof error.response?.body?.error === 'string' &&\n    error.response.body.error.trim()\n  ) {\n    return error.response.body.error;\n  }\n\n  return safeStringify(error);\n}\n\ntry {\n  const response = await this.helpers.httpRequest({\n    method: cfg.method || 'GET',\n    url: cfg.url,\n    timeout: 10000,\n    returnFullResponse: true,\n    ignoreHttpStatusErrors: true,\n    encoding: 'text'\n  });\n\n  httpStatus =\n    Number(\n      response.statusCode ||\n      response.status ||\n      0\n    ) || null;\n\n  if (typeof response.body === 'string') {\n    body = response.body;\n  } else if (\n    response.body !== undefined &&\n    response.body !== null\n  ) {\n    body = safeStringify(response.body);\n  }\n\n} catch (e) {\n  errorMessage = extractErrorMessage(e);\n  rawError = safeStringify(e);\n\n  httpStatus =\n    Number(\n      e?.statusCode ||\n      e?.status ||\n      e?.response?.statusCode ||\n      e?.response?.status ||\n      0\n    ) || null;\n\n  const errorBody =\n    e?.response?.body ??\n    e?.body ??\n    '';\n\n  if (typeof errorBody === 'string') {\n    body = errorBody;\n  } else if (errorBody) {\n    body = safeStringify(errorBody);\n  }\n}\n\nconst responseTimeMs = Date.now() - started;\n\nconst expectedStatus =\n  Number(cfg.expectedStatus || 200);\n\nconst threshold =\n  Number(cfg.responseTimeThresholdMs || 3000);\n\nconst expectedText =\n  String(cfg.expectedText || '');\n\nlet healthStatus = 'UP';\nlet functionalValidation = 'NOT_APPLICABLE';\n\nif (!httpStatus || httpStatus !== expectedStatus) {\n  healthStatus = 'DOWN';\n  functionalValidation = 'NOT_APPLICABLE';\n\n} else if (\n  expectedText &&\n  !body.includes(expectedText)\n) {\n  healthStatus = 'FUNCTIONAL_FAILURE';\n  functionalValidation = 'FAIL';\n\n} else if (expectedText) {\n  functionalValidation = 'PASS';\n\n  if (responseTimeMs > threshold) {\n    healthStatus = 'DEGRADED';\n  }\n\n} else if (responseTimeMs > threshold) {\n  healthStatus = 'DEGRADED';\n}\n\nreturn {\n  json: {\n    ...cfg,\n\n    attempt: 3,\n\n    httpStatus,\n    responseTimeMs,\n\n    healthStatus,\n    functionalValidation,\n\n    errorMessage,\n    rawError,\n\n    checkedAt: new Date().toISOString(),\n\n    responseSnippet:\n      typeof body === 'string'\n        ? body.slice(0, 500)\n        : ''\n  }\n};"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2752,
+        112
+      ],
+      "id": "22a244ec-de9d-408f-a22e-24dbc8731446",
+      "name": "10 - Final Retry #3"
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "const x = $json;\n\nconst pad = (n) => String(n).padStart(2, '0');\n\nconst d = new Date();\n\nconst timestamp =\n  d.getFullYear() +\n  '-' +\n  pad(d.getMonth() + 1) +\n  '-' +\n  pad(d.getDate()) +\n  ' ' +\n  pad(d.getHours()) +\n  ':' +\n  pad(d.getMinutes()) +\n  ':' +\n  pad(d.getSeconds());\n\nreturn {\n  json: {\n    Timestamp: timestamp,\n\n    Application: x.application || 'VWO',\n    Environment: x.environment || 'QA',\n\n    'Service Name': x.serviceName || '',\n    'Check Type': x.checkType || 'HTTP',\n\n    Endpoint: x.url || '',\n\n    'HTTP Status': x.httpStatus ?? '',\n\n    'Response Time Ms': x.responseTimeMs ?? 0,\n\n    'Response Time Threshold Ms':\n      x.responseTimeThresholdMs ?? 3000,\n\n    'Health Status': x.healthStatus || 'UNKNOWN',\n\n    'Functional Validation':\n      x.functionalValidation || '',\n\n    'Retry Count':\n      Math.max(0, Number(x.attempt || 1) - 1),\n\n    'Error Message': x.errorMessage || '',\n\n    'Response Snippet': x.responseSnippet || '',\n\n    'Workflow Execution ID':\n      String($execution.id),\n\n    Critical: !!x.critical,\n\n    _monitor: x,\n  },\n};"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        3008,
+        272
+      ],
+      "id": "fd4abe95-7311-485b-88ae-d9bcaf6fb12d",
+      "name": "11 - Normalise History Row"
+    },
+    {
+      "parameters": {
+        "operation": "append",
+        "documentId": {
+          "__rl": true,
+          "value": "1vbA3hmYYne6XiLtcZp2CnX7SMFBjKFosoMMz73qm8Xg",
+          "mode": "list",
+          "cachedResultName": "सोलर पैनल सूचना माध्यमिक शिक्षा विभाग जनपद गाजियाबाद",
+          "cachedResultUrl": "https://docs.google.com/spreadsheets/d/1vbA3hmYYne6XiLtcZp2CnX7SMFBjKFosoMMz73qm8Xg/edit?usp=drivesdk"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": 1773284521,
+          "mode": "list",
+          "cachedResultName": "Health_Check_History",
+          "cachedResultUrl": "https://docs.google.com/spreadsheets/d/1vbA3hmYYne6XiLtcZp2CnX7SMFBjKFosoMMz73qm8Xg/edit#gid=1773284521"
+        },
+        "columns": {
+          "mappingMode": "autoMapInputData",
+          "value": {},
+          "matchingColumns": [],
+          "schema": [
+            {
+              "id": "Timestamp",
+              "displayName": "Timestamp",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "Application",
+              "displayName": "Application",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "Environment",
+              "displayName": "Environment",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "Service Name",
+              "displayName": "Service Name",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "Check Type",
+              "displayName": "Check Type",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "Endpoint",
+              "displayName": "Endpoint",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "HTTP Status",
+              "displayName": "HTTP Status",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "Response Time Ms",
+              "displayName": "Response Time Ms",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "Response Time Threshold Ms",
+              "displayName": "Response Time Threshold Ms",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "Health Status",
+              "displayName": "Health Status",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "Functional Validation",
+              "displayName": "Functional Validation",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "Retry Count",
+              "displayName": "Retry Count",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "Error Message",
+              "displayName": "Error Message",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "Response Snippet",
+              "displayName": "Response Snippet",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "Workflow Execution ID",
+              "displayName": "Workflow Execution ID",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "Critical",
+              "displayName": "Critical",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            }
+          ],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.5,
+      "position": [
+        3504,
+        192
+      ],
+      "id": "6a2ace4b-d1bf-4e48-85d7-d3d8e54a08a8",
+      "name": "12 - Append Health Check History",
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "MJv8r8KlvPbAtJGG",
+          "name": "Google Sheets account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "753631d6-3ff6-47f0-81dd-36990b0a2d93",
+              "leftValue": "={{ ['DOWN','FUNCTIONAL_FAILURE'].includes($json['Health Status']) }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        3504,
+        368
+      ],
+      "id": "a906dcd5-7042-4573-b935-0b288513e79a",
+      "name": "13 - Final Failure?"
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "const row = $json;\nconst x = row._monitor || {};\nconst now = new Date();\nconst incidentId =\n  'INC-' +\n  now.toISOString().replace(/\\D/g, '').slice(0, 14) +\n  '-' +\n  String(x.serviceName || 'service').toLowerCase().replace(/[^a-z0-9]+/g, '-').slice(0, 24);\n\nreturn {\n  json: {\n    'Incident ID': incidentId,\n    'Application': x.application || 'VWO',\n    'Environment': x.environment || 'QA',\n    'Service Name': x.serviceName || '',\n    'Endpoint': x.url || '',\n    'Status': 'OPEN',\n    'Severity': x.critical ? 'SEV-1' : 'SEV-3',\n    'Downtime Start': now.toISOString().replace('T', ' ').slice(0, 19),\n    'Recovery Time': '',\n    'Downtime Seconds': 0,\n    'Retry Count': Math.max(0, Number(x.attempt || 3) - 1),\n    'HTTP Status': x.httpStatus ?? '',\n    'Response Time Ms': x.responseTimeMs ?? 0,\n    'Failure Reason': x.errorMessage || x.healthStatus || 'Health check failed',\n    'HTTP Response': x.responseSnippet || '',\n    'Workflow Execution ID': String($execution.id)\n  }\n};"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        3760,
+        368
+      ],
+      "id": "853fdf2e-c3b5-4dfa-9b3a-67ea58f59109",
+      "name": "14 - Build Incident Row"
+    },
+    {
+      "parameters": {
+        "operation": "append",
+        "documentId": {
+          "__rl": true,
+          "value": "1vbA3hmYYne6XiLtcZp2CnX7SMFBjKFosoMMz73qm8Xg",
+          "mode": "list",
+          "cachedResultName": "सोलर पैनल सूचना माध्यमिक शिक्षा विभाग जनपद गाजियाबाद",
+          "cachedResultUrl": "https://docs.google.com/spreadsheets/d/1vbA3hmYYne6XiLtcZp2CnX7SMFBjKFosoMMz73qm8Xg/edit?usp=drivesdk"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": 1127707547,
+          "mode": "list",
+          "cachedResultName": "Downtime_Incidents",
+          "cachedResultUrl": "https://docs.google.com/spreadsheets/d/1vbA3hmYYne6XiLtcZp2CnX7SMFBjKFosoMMz73qm8Xg/edit#gid=1127707547"
+        },
+        "columns": {
+          "mappingMode": "autoMapInputData",
+          "value": {},
+          "matchingColumns": [],
+          "schema": [
+            {
+              "id": "Incident ID",
+              "displayName": "Incident ID",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "Application",
+              "displayName": "Application",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "Environment",
+              "displayName": "Environment",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "Service Name",
+              "displayName": "Service Name",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "Endpoint",
+              "displayName": "Endpoint",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "Status",
+              "displayName": "Status",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "Severity",
+              "displayName": "Severity",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "Downtime Start",
+              "displayName": "Downtime Start",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "Recovery Time",
+              "displayName": "Recovery Time",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "Downtime Seconds",
+              "displayName": "Downtime Seconds",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": " Retry Count",
+              "displayName": " Retry Count",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "HTTP Status",
+              "displayName": "HTTP Status",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "Response Time Ms",
+              "displayName": "Response Time Ms",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "Failure Reason",
+              "displayName": "Failure Reason",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": " HTTP Response",
+              "displayName": " HTTP Response",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": " Workflow Execution ID",
+              "displayName": " Workflow Execution ID",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "Retry Count",
+              "displayName": "Retry Count",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "HTTP Response",
+              "displayName": "HTTP Response",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "Workflow Execution ID",
+              "displayName": "Workflow Execution ID",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            }
+          ],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.5,
+      "position": [
+        4016,
+        368
+      ],
+      "id": "af459950-7b4a-4c88-99af-3d59b1050b9a",
+      "name": "15 - Append Downtime Incident",
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "MJv8r8KlvPbAtJGG",
+          "name": "Google Sheets account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "cronExpression",
+              "expression": "5 0 * * *"
+            }
+          ]
+        }
+      },
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        304,
+        688
+      ],
+      "id": "3d9818b8-04f5-4cfa-b2a3-baa942e8c666",
+      "name": "20 - Daily Availability Schedule"
+    },
+    {
+      "parameters": {
+        "documentId": {
+          "__rl": true,
+          "value": "1vbA3hmYYne6XiLtcZp2CnX7SMFBjKFosoMMz73qm8Xg",
+          "mode": "list",
+          "cachedResultName": "सोलर पैनल सूचना माध्यमिक शिक्षा विभाग जनपद गाजियाबाद",
+          "cachedResultUrl": "https://docs.google.com/spreadsheets/d/1vbA3hmYYne6XiLtcZp2CnX7SMFBjKFosoMMz73qm8Xg/edit?usp=drivesdk"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": 1773284521,
+          "mode": "list",
+          "cachedResultName": "Health_Check_History",
+          "cachedResultUrl": "https://docs.google.com/spreadsheets/d/1vbA3hmYYne6XiLtcZp2CnX7SMFBjKFosoMMz73qm8Xg/edit#gid=1773284521"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.5,
+      "position": [
+        560,
+        688
+      ],
+      "id": "ed408283-5b57-464f-976c-970e94865d0a",
+      "name": "21 - Read Health History",
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "MJv8r8KlvPbAtJGG",
+          "name": "Google Sheets account"
+        }
+      },
+      "alwaysOutputData": true
+    },
+    {
+      "parameters": {
+        "jsCode": "const rows = $input.all().map(i => i.json || {});\n// History rows are stamped in server-local time, so the day key must be too:\n// a UTC key excludes rows written either side of midnight on a UTC+5:30 host.\nconst now = new Date();\nconst pad2 = (n) => String(n).padStart(2, '0');\nconst today =\n  now.getFullYear() +\n  '-' +\n  pad2(now.getMonth() + 1) +\n  '-' +\n  pad2(now.getDate());\n\nconst todayRows = rows.filter((r) => {\n  const ts = String(r['Timestamp'] || r.timestamp || '');\n  return ts.slice(0, 10) === today;\n});\n\nconst total = todayRows.length;\nconst failed = todayRows.filter((r) =>\n  ['DOWN', 'FUNCTIONAL_FAILURE'].includes(\n    String(r['Health Status'] || r.healthStatus || '').toUpperCase()\n  )\n).length;\n\nconst available = total - failed;\nconst availabilityPct = total ? Math.round((available / total) * 10000) / 100 : 100;\n\nreturn [{\n  json: {\n    'Date': today,\n    'Application': 'VWO',\n    'Environment': 'OVERALL',\n    'Service Name': 'ALL_SERVICES',\n    'Total Checks': total,\n    'Failed Checks': failed,\n    'Availability Percentage': availabilityPct,\n    'Updated At': new Date().toISOString()\n  }\n}];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        832,
+        688
+      ],
+      "id": "5054999e-a180-403f-a310-fbf792bd8768",
+      "name": "22 - Aggregate Daily Availability"
+    },
+    {
+      "parameters": {
+        "operation": "appendOrUpdate",
+        "documentId": {
+          "__rl": true,
+          "value": "1vbA3hmYYne6XiLtcZp2CnX7SMFBjKFosoMMz73qm8Xg",
+          "mode": "list",
+          "cachedResultName": "सोलर पैनल सूचना माध्यमिक शिक्षा विभाग जनपद गाजियाबाद",
+          "cachedResultUrl": "https://docs.google.com/spreadsheets/d/1vbA3hmYYne6XiLtcZp2CnX7SMFBjKFosoMMz73qm8Xg/edit?usp=drivesdk"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": 1478199802,
+          "mode": "list",
+          "cachedResultName": "Daily_Availability",
+          "cachedResultUrl": "https://docs.google.com/spreadsheets/d/1vbA3hmYYne6XiLtcZp2CnX7SMFBjKFosoMMz73qm8Xg/edit#gid=1478199802"
+        },
+        "columns": {
+          "mappingMode": "autoMapInputData",
+          "value": {},
+          "matchingColumns": [
+            "Date"
+          ],
+          "schema": [
+            {
+              "id": "Date",
+              "displayName": "Date",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "Application",
+              "displayName": "Application",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "Environment",
+              "displayName": "Environment",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "Service Name",
+              "displayName": "Service Name",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "Total Checks",
+              "displayName": "Total Checks",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "Failed Checks",
+              "displayName": "Failed Checks",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "Availability Percentage",
+              "displayName": "Availability Percentage",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "Updated At",
+              "displayName": "Updated At",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            }
+          ],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.5,
+      "position": [
+        1088,
+        688
+      ],
+      "id": "05f844e9-c2c1-483c-82bb-e2133d7ed922",
+      "name": "23 - Upsert Daily Availability",
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "MJv8r8KlvPbAtJGG",
+          "name": "Google Sheets account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "content": "## VWO QA Downtime Monitor\n\n### Purpose\nRuns the VWO service health checks, performs retries using n8n Wait nodes, writes check history, and creates downtime incidents.\n\n### Before activation\n1. Replace `REPLACE_WITH_SPREADSHEET_ID` in Google Sheets nodes.\n2. Attach your Google Sheets credential.\n3. Create these tabs:\n   - `Health_Check_History`\n   - `Downtime_Incidents`\n   - `Daily_Availability`\n4. Edit `03 - Build Service Checks` to use the exact VWO QA/Staging/Production endpoints you want to monitor.\n5. Import `02_VWO_Downtime_Tracker_API.json`.\n6. In the API workflow select this workflow in `API 08c - Run Monitoring Workflow`.\n\n### Retry design\nInitial check -> if failed -> Wait 20s -> Retry #2 -> if failed -> Wait 30s -> Retry #3.\n\nThe Wait nodes avoid the 60-second Code-node timeout caused by sleeping inside JavaScript.\n",
+        "height": 520,
+        "width": 520,
+        "color": 4
+      },
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        0,
+        0
+      ],
+      "id": "966f4926-c658-4b12-82a3-b8c6dc13503c",
+      "name": "README - Monitor Setup"
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "const x = $json;\n\nconst status =\n  x['Health Status'] ||\n  x.healthStatus ||\n  'UNKNOWN';\n\n// Every check is appended, not just failures. Previously this node returned\n// early for UP/DEGRADED rows, so Health_Check_History held only failures,\n// latency charts had no healthy series and daily availability read ~0%.\nconst pad = (n) => String(n).padStart(2, '0');\n\nfunction toSheetTimestamp(value) {\n  if (!value) {\n    return '';\n  }\n\n  const d = new Date(value);\n\n  if (Number.isNaN(d.getTime())) {\n    return String(value);\n  }\n\n  return (\n    d.getFullYear() +\n    '-' +\n    pad(d.getMonth() + 1) +\n    '-' +\n    pad(d.getDate()) +\n    ' ' +\n    pad(d.getHours()) +\n    ':' +\n    pad(d.getMinutes()) +\n    ':' +\n    pad(d.getSeconds())\n  );\n}\n\nreturn {\n  json: {\n    'Timestamp':\n      x['Timestamp'] || toSheetTimestamp(x.checkedAt),\n\n    'Application': x['Application'] || x.application || '',\n    'Environment': x['Environment'] || x.environment || '',\n    'Service Name': x['Service Name'] || x.serviceName || '',\n    'Endpoint': x['Endpoint'] || x.url || '',\n\n    'HTTP Status':\n      x['HTTP Status'] ??\n      x.httpStatus ??\n      '',\n\n    'Response Time Ms':\n      x['Response Time Ms'] ??\n      x.responseTimeMs ??\n      0,\n\n    'Response Time Threshold Ms':\n      x['Response Time Threshold Ms'] ??\n      x.responseTimeThresholdMs ??\n      3000,\n\n    'Health Status': status,\n\n    'Functional Validation':\n      x['Functional Validation'] ||\n      x.functionalValidation ||\n      '',\n\n    'Retry Count':\n      x['Retry Count'] ??\n      x.configuredRetryCount ??\n      0,\n\n    'Error Message':\n      x['Error Message'] ||\n      x.errorMessage ||\n      '',\n\n    'Response Snippet':\n      x['Response Snippet'] ||\n      x.responseSnippet ||\n      '',\n\n    'Workflow Execution ID':\n      x['Workflow Execution ID'] ||\n      String($execution.id),\n\n    'Critical':\n      x['Critical'] ??\n      x.critical ??\n      false\n  }\n};"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        3232,
+        272
+      ],
+      "id": "5c211fdc-d968-4279-b6a9-1a72229f49cc",
+      "name": "11A - Prepare Sheet Row",
+      "alwaysOutputData": false
+    },
+    {
+      "parameters": {
+        "jsCode": "const input = $input.first()?.json || {};\n\nconst requestedEnvironment =\n  input.environment ||\n  input.body?.environment ||\n  input.query?.environment ||\n  '';\n\nreturn [\n  {\n    json: {\n      requestedEnvironment\n    }\n  }\n];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        528,
+        192
+      ],
+      "id": "76e6c9ee-6b86-4e70-9602-0e81947e442e",
+      "name": "02A - Resolve Monitor Context"
+    },
+    {
+      "parameters": {
+        "documentId": {
+          "__rl": true,
+          "value": "1vbA3hmYYne6XiLtcZp2CnX7SMFBjKFosoMMz73qm8Xg",
+          "mode": "list",
+          "cachedResultName": "सोलर पैनल सूचना माध्यमिक शिक्षा विभाग जनपद गाजियाबाद",
+          "cachedResultUrl": "https://docs.google.com/spreadsheets/d/1vbA3hmYYne6XiLtcZp2CnX7SMFBjKFosoMMz73qm8Xg/edit?usp=drivesdk"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": 2080925929,
+          "mode": "list",
+          "cachedResultName": "Settings",
+          "cachedResultUrl": "https://docs.google.com/spreadsheets/d/1vbA3hmYYne6XiLtcZp2CnX7SMFBjKFosoMMz73qm8Xg/edit#gid=2080925929"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.7,
+      "position": [
+        752,
+        192
+      ],
+      "id": "e8b80593-7995-43b2-9ad2-e2e151caffd2",
+      "name": "02B - Read Runtime Settings",
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "MJv8r8KlvPbAtJGG",
+          "name": "Google Sheets account"
+        }
+      },
+      "onError": "continueRegularOutput",
+      "alwaysOutputData": true
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "01 - Scheduled Monitor": {
+      "main": [
+        [
+          {
+            "node": "02A - Resolve Monitor Context",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "02 - Called By API Workflow": {
+      "main": [
+        [
+          {
+            "node": "02A - Resolve Monitor Context",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "03 - Build Service Checks": {
+      "main": [
+        [
+          {
+            "node": "04 - Initial Health Check",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "04 - Initial Health Check": {
+      "main": [
+        [
+          {
+            "node": "05 - Retry Needed?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "05 - Retry Needed?": {
+      "main": [
+        [
+          {
+            "node": "06 - Wait 20 Seconds",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "11 - Normalise History Row",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "06 - Wait 20 Seconds": {
+      "main": [
+        [
+          {
+            "node": "07 - Retry Check #2",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "07 - Retry Check #2": {
+      "main": [
+        [
+          {
+            "node": "08 - Retry #2 Still Failed?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "08 - Retry #2 Still Failed?": {
+      "main": [
+        [
+          {
+            "node": "09 - Wait 30 Seconds",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "11 - Normalise History Row",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "09 - Wait 30 Seconds": {
+      "main": [
+        [
+          {
+            "node": "10 - Final Retry #3",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "10 - Final Retry #3": {
+      "main": [
+        [
+          {
+            "node": "11 - Normalise History Row",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "11 - Normalise History Row": {
+      "main": [
+        [
+          {
+            "node": "13 - Final Failure?",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "11A - Prepare Sheet Row",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "13 - Final Failure?": {
+      "main": [
+        [
+          {
+            "node": "14 - Build Incident Row",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "14 - Build Incident Row": {
+      "main": [
+        [
+          {
+            "node": "15 - Append Downtime Incident",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "20 - Daily Availability Schedule": {
+      "main": [
+        [
+          {
+            "node": "21 - Read Health History",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "21 - Read Health History": {
+      "main": [
+        [
+          {
+            "node": "22 - Aggregate Daily Availability",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "22 - Aggregate Daily Availability": {
+      "main": [
+        [
+          {
+            "node": "23 - Upsert Daily Availability",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "11A - Prepare Sheet Row": {
+      "main": [
+        [
+          {
+            "node": "12 - Append Health Check History",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "02A - Resolve Monitor Context": {
+      "main": [
+        [
+          {
+            "node": "02B - Read Runtime Settings",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "02B - Read Runtime Settings": {
+      "main": [
+        [
+          {
+            "node": "03 - Build Service Checks",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "binaryMode": "separate"
+  },
+  "versionId": "2224484c-510f-41b8-972d-26d9cd7702c6",
+  "meta": {
+    "templateCredsSetupCompleted": true,
+    "instanceId": "9161cf1ee5c8e758097448556afd72c9ef4603bb9e07bbc88bd89068d7db8d86"
+  },
+  "nodeGroups": [],
+  "id": "srl0Eh43dQwUgCz2",
+  "tags": []
+}
