@@ -233,7 +233,9 @@ Interactive docs: <http://127.0.0.1:8011/docs>
 | `Ollama is up but 'nomic-embed-text' is not pulled` | `ollama pull nomic-embed-text` |
 | `Could not reach Ollama` | Start it: `ollama serve` |
 | Chat fails with 503 | `GROQ_API_TOKEN` missing/expired, or the model id is not in your account — check `/api/health` |
-| Deployed app says embeddings are not configured | Set `EMBEDDING_PROVIDER=qdrant`, `VECTOR_STORE=qdrant`, `QDRANT_URL`, `QDRANT_API_KEY` in Vercel; free inference models are **US-region** only |
+| Deployed app says embeddings are not configured | Set `EMBEDDING_PROVIDER=qdrant`, `VECTOR_STORE=qdrant`, `QDRANT_URL`, `QDRANT_API_KEY` in Vercel |
+| Ingest fails with *"… is not found among supported models. Check if `cloud_inference` is set to True or `fastembed` is installed"* | The Qdrant **client** was built without `cloud_inference=True`, so it tried to embed locally. Fixed in `server/vector_store.py`; also make sure `qdrant-client>=1.13.1` (1.12.0 has no such argument) |
+| Local and deployed show different documents | `QDRANT_EMBED_MODEL` casing differs — it feeds the collection name, so use the console's exact spelling in both places |
 | `Vector dimension error` on ingest | `QDRANT_COLLECTION_PREFIX` points at an existing collection of a different width — use a new prefix, or set `QDRANT_EMBED_DIMS` to the model's real size |
 | UI shows "Could not reach the RAG API" | The API process is not running on :8011 (restart it; the Vite proxy reports 500 when the backend is down) |
 | `Could not satisfy the request Accept-Encoding header` style proxy noise | Reload the page after restarting the API |

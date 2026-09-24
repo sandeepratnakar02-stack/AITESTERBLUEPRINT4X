@@ -92,7 +92,10 @@ class Settings:
     )
     qdrant_embed_model: str = field(
         default_factory=lambda: _env(
-            "QDRANT_EMBED_MODEL", default="sentence-transformers/all-minilm-l6-v2"
+            # Canonical spelling, exactly as it appears in the Qdrant Cloud Inference tab. Model ids
+            # are matched case-sensitively, so the default mirrors the console verbatim.
+            "QDRANT_EMBED_MODEL",
+            default="sentence-transformers/all-MiniLM-L6-v2",
         )
     )
     # 0 means "not specified" — the real width is then read from the cluster (existing collection or

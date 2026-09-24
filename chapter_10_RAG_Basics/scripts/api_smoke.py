@@ -137,8 +137,10 @@ def main() -> int:
         check("vector 200", vector.status_code == 200)
         if vector.status_code == 200:
             body = vector.json()
-            check("vector dims match config", body["stats"]["dims"] == config.get("embed_dims"),
-                  f"{body['stats']['dims']} vs {config.get('embed_dims')}")
+            # The active width: the Cloud Inference hint in production, the Ollama width locally.
+            expected_dims = config.get("embedding_dims") or config.get("embed_dims")
+            check("vector dims match config", body["stats"]["dims"] == expected_dims,
+                  f"{body['stats']['dims']} vs {expected_dims}")
 
     # ---------------------------------------------------------------- /api/search
     if active:
@@ -154,12 +156,27 @@ def main() -> int:
             for mode in ("keyword", "vector", "hybrid"):
                 check(f"{mode} returned 3 hits", len(modes[mode]["hits"]) == 3, str(len(modes[mode]["hits"])))
             vector_hit = modes["vector"]["hits"][0]
-            manual = vector_hit["breakdown"]["cosine"]
-            from_distance = vector_hit["breakdown"]["similarity_from_distance"]
-            if from_distance is not None:
-                check("manual cosine == 1 - stored distance",
-                      abs(manual - from_distance) < 1e-3, f"{manual} vs {from_distance}")
-            check("query vector returned", len(result["query_vector"]["vector"]) == config.get("embed_dims"))
+            breakdown = vector_hit["breakdown"]
+            if breakdown.get("server_side"):
+                # Cloud Inference embeds the query in the cluster and returns the cosine score; the
+                # raw query vector (and therefore the dot-product breakdown) is not exposed.
+                check("vector score reported by the cluster", vector_hit["score"] is not None,
+                      str(vector_hit["score"]))
+            else:
+                manual = breakdown["cosine"]
+                from_distance = breakdown["similarity_from_distance"]
+                if from_distance is not None:
+                    check("manual cosine == 1 - stored distance",
+                          abs(manual - from_distance) < 1e-3, f"{manual} vs {from_distance}")
+            query_vector = result.get("query_vector")
+            if query_vector:
+                check("query vector returned", len(query_vector["vector"]) == expected_dims)
+            else:
+                check(
+                    "query embedding is server-side (no raw vector exposed)",
+                    result.get("embedding_mode", "").startswith("server-side"),
+                    str(result.get("query_vector_unavailable_reason"))[:80],
+                )
             check("mode echoed back", result.get("mode") in {"keyword", "vector", "hybrid"})
 
         # ------------------------------------------------------------ /api/chat

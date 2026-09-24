@@ -15,4 +15,7 @@ httpx>=0.27.0
 numpy>=1.26.0
 python-dotenv>=1.0.1
 python-multipart>=0.0.9      # multipart parsing for the /api/ingest file-upload path
-qdrant-client>=1.12.0        # imported lazily — only loaded when VECTOR_STORE=qdrant
+qdrant-client>=1.13.1        # imported lazily — only loaded when VECTOR_STORE=qdrant
+                             # 1.13.1 is the verified minimum: 1.12.0 has no `cloud_inference`
+                             # argument, and without it the client silently falls back to LOCAL
+                             # embedding (FastEmbed) instead of Qdrant Cloud Inference.

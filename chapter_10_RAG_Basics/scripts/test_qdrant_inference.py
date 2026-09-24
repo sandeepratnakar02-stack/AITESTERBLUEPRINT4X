@@ -232,6 +232,26 @@ def test_helpers() -> None:
     forbidden = friendly_qdrant_error(Exception("403 Forbidden"), "embed")
     check("auth error mentions the key", "QDRANT_API_KEY" in forbidden)
 
+    # The reported production failure: a client built without cloud_inference=True makes the SDK
+    # embed locally via FastEmbed. The message must name the client flag, not send the operator
+    # hunting for a model that is already available on the cluster.
+    local_path = friendly_qdrant_error(
+        Exception(
+            f"{MODEL} is not found among supported models. Check if `cloud_inference` is set to "
+            f"True or `fastembed` is installed (for local inference?)"
+        ),
+        "embed and store rows 0-32",
+    )
+    check("local-inference symptom points at the client flag",
+          "cloud_inference" in local_path and "client configuration" in local_path)
+    check("...and does not blame the cluster's model list",
+          "not available on this cluster" not in local_path)
+    still_missing = friendly_qdrant_error(
+        Exception("Model some/other-model is not found among supported models"), "embed"
+    )
+    check("a genuine server-side miss still names QDRANT_EMBED_MODEL",
+          "QDRANT_EMBED_MODEL" in still_missing)
+
     fused = rrf_fuse(["a", "b"], ["a", "b"], 60, 2)
     check("RRF keeps the double-first chunk on top", fused[0][0] == "a")
     check("RRF total for #1 in both = 2/(k+1)",
@@ -322,6 +342,71 @@ def test_inference_io() -> None:
           len(store.get_vector(name, "c0000-aaaaaa") or []) == TRUE_DIMS)
 
 
+def test_client_configuration() -> None:
+    """Regression: the production client MUST be built with ``cloud_inference=True``.
+
+    ``QdrantClient`` defaults that flag to **False**, and with it off the SDK takes its *local*
+    inference branch for ``models.Document``: it hands the text to FastEmbed instead of the cluster.
+    FastEmbed is deliberately not a dependency here, so PDF ingestion died with
+
+        "<model> is not found among supported models. Check if `cloud_inference` is set to True or
+         `fastembed` is installed (for local inference?)"
+
+    even though the model was available on the free cluster. This test fails if anyone constructs
+    the client without the flag again.
+    """
+    print("\n== client configuration (Cloud Inference regression)")
+    from qdrant_client import QdrantClient as SdkClient
+    from qdrant_client import models as sdk_models
+    from qdrant_client.embed.type_inspector import Inspector
+
+    store = QdrantStore()  # the real constructor: this is the client production uses
+    client = store.client
+    check(
+        "the store builds a real qdrant_client.QdrantClient",
+        type(client).__name__ == "QdrantClient",
+        type(client).__name__,
+    )
+    check(
+        "cloud_inference=True on the production client",
+        getattr(client, "cloud_inference", None) is True,
+        f"cloud_inference={getattr(client, 'cloud_inference', '<missing>')}",
+    )
+
+    # Prove the check has teeth: the SDK default is False, and with the flag off the SDK would take
+    # its local-inference branch for exactly the points this store sends.
+    plain = SdkClient(url="https://stub-cluster.cloud.qdrant.io:6333", api_key="stub")
+    check("the SDK default is cloud_inference=False", plain.cloud_inference is False)
+
+    documents = [sdk_models.PointStruct(id=1, vector=sdk_models.Document(text="hello", model=MODEL))]
+    needs_inference = Inspector().inspect(documents)
+    check("a Document point is flagged as requiring inference", needs_inference is True)
+    check(
+        "...so with the flag off the SDK embeds locally (the reported bug)",
+        bool(needs_inference and not plain.cloud_inference),
+    )
+    check(
+        "...whereas our client delegates it to the cluster",
+        bool(needs_inference and client.cloud_inference),
+    )
+
+    # The same singleton serves ingestion and search, so they cannot disagree about the flag.
+    from server.vector_store import get_store
+
+    check("ingest and search share one store instance", get_store() is get_store())
+    check("that shared instance is Cloud-Inference enabled too",
+          getattr(get_store().client, "cloud_inference", None) is True)
+
+    # The configured model must reach the SDK verbatim: ids are case-sensitive.
+    check(
+        "the model id is used exactly as configured (no case mangling)",
+        store.settings.qdrant_embed_model == os.environ["QDRANT_EMBED_MODEL"],
+        store.settings.qdrant_embed_model,
+    )
+    check("the store keeps the real models module for Inference Objects",
+          hasattr(store.models, "Document"))
+
+
 def test_misconfiguration() -> None:
     print("\n== misconfiguration is explicit")
     store = make_store()
@@ -361,6 +446,7 @@ def test_misconfiguration() -> None:
 def main() -> int:
     print("Qdrant Cloud Inference unit tests (stubbed cluster, no credentials)")
     test_helpers()
+    test_client_configuration()
     test_dim_discovery()
     test_collection_lifecycle()
     test_inference_io()

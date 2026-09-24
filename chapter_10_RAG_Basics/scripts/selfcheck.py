@@ -28,10 +28,10 @@ CHAPTER_DIR = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(CHAPTER_DIR))
 
 from server.config import settings  # noqa: E402
-from server.embeddings import OllamaEmbedder  # noqa: E402
+from server.embeddings import get_embedder  # noqa: E402
 from server.ingest import run_ingest  # noqa: E402
+from server.main import _retrieve  # noqa: E402
 from server.rag import ask  # noqa: E402
-from server.search import load_index  # noqa: E402
 from server.vector_store import get_store  # noqa: E402
 
 QUERY = "What are the acceptance criteria and requirements for the login dashboard?"
@@ -48,23 +48,34 @@ def main() -> int:
     header("1. CONFIG")
     print(f"PDF              : {settings.pdf_path.name}")
     print(f"PDF exists       : {settings.pdf_path.exists()}")
-    print(f"Embedding model  : {settings.embed_model} (expect {settings.embed_dims} dims) via {settings.ollama_url}")
+    if settings.uses_cloud_inference:
+        print(f"Embeddings       : Qdrant Cloud Inference, model={settings.embedding_model_name}")
+        print(f"                   dims hint={settings.embedding_dims_hint} on {settings.qdrant_url}")
+    else:
+        print(f"Embedding model  : {settings.embed_model} (expect {settings.embed_dims} dims) via {settings.ollama_url}")
+    print(f"Vector store     : {settings.vector_store}")
     print(f"Groq model       : {settings.groq_model}")
     print(f"Groq key present : {settings.groq_key_present}")
     print(f"Chunk defaults   : size={settings.chunk_size} overlap={settings.chunk_overlap} prefixes={settings.use_prefixes}")
     if not settings.groq_key_present:
         failures.append("GROQ_API_TOKEN missing from .env")
 
-    header("2. OLLAMA HEALTH")
-    health = OllamaEmbedder().health()
-    print(json.dumps({k: health[k] for k in ("ok", "model", "model_present", "dims", "endpoint", "error")}, indent=2))
-    if not health["ok"]:
-        print("\nFATAL: Ollama/nomic-embed-text is not usable — stopping here.")
+    header("2. EMBEDDING PROVIDER HEALTH")
+    health = get_embedder().health()
+    print(json.dumps(
+        {k: health.get(k) for k in ("ok", "provider", "mode", "model", "model_present", "dims", "endpoint", "note", "error")},
+        indent=2,
+        default=str,
+    ))
+    if not health.get("ok"):
+        print("\nFATAL: the embedding provider is not usable — stopping here.")
         return 1
-    if health["dims"] != settings.embed_dims:
-        failures.append(f"embed dims {health['dims']} != configured {settings.embed_dims}")
+    if settings.embedding_is_local and health.get("dims") != settings.embed_dims:
+        failures.append(f"embed dims {health.get('dims')} != configured {settings.embed_dims}")
 
     header("3. INGEST (extract -> chunk -> embed -> store)")
+    if settings.uses_cloud_inference:
+        print(f"mode: server-side inference — this uploads the PDF to your Qdrant cluster")
     started = time.perf_counter()
     try:
         artifact = run_ingest()
@@ -94,63 +105,75 @@ def main() -> int:
     sample = artifact["chunks"][0]
     print(f"\nfirst chunk id   : {sample['id']} pages {sample['page_start']}-{sample['page_end']} chars={sample['chars']}")
     print(f"first 300 chars  : {sample['text'][:300]!r}")
-    print(f"vector stats     : norm={embedding['stats'][0]['norm']} mean={embedding['stats'][0]['mean']} nonzero={embedding['stats'][0]['nonzero']}")
+    stats = embedding.get("stats") or []
+    if stats:
+        print(f"vector stats     : norm={stats[0]['norm']} mean={stats[0]['mean']} nonzero={stats[0]['nonzero']}")
+    else:
+        print("vector stats     : n/a — the cluster embedded server-side, so no local vector exists")
 
     live_count = get_store().count(store["collection"])
-    print(f"chroma count     : {live_count} (expected {chunking['count']})")
+    print(f"{settings.vector_store:<8} rows   : {live_count} (expected {chunking['count']})")
     if live_count != chunking["count"]:
-        failures.append(f"chroma row count {live_count} != chunk count {chunking['count']}")
+        failures.append(f"stored row count {live_count} != chunk count {chunking['count']}")
 
     header("4. SEARCH — all three algorithms")
-    index = load_index(store["collection"], force=True)
-    embedder = OllamaEmbedder()
-    query_vector = embedder.embed_query(QUERY)
+    # The same dispatcher the API uses, so this exercises the real production path in either mode.
+    payload, search_ms, top_hits = _retrieve(store["collection"], QUERY, "hybrid", 3, None)
+    modes = payload["modes"]
+    print(f"query: {QUERY}")
+    print(f"embedding: {payload.get('embedding_mode', 'client-side (Ollama)')}   total {search_ms:.1f} ms\n")
 
-    chroma_distances = {
-        hit.chunk_id: hit.distance for hit in get_store().query(store["collection"], query_vector.vectors[0], top_k=10)
-    }
-    keyword = index.keyword(QUERY, top_k=3)
-    vector = index.vector(query_vector.vectors[0], top_k=3, chroma_distances=chroma_distances)
-    hybrid = index.hybrid(QUERY, query_vector.vectors[0], top_k=3)
-
-    print(f"query: {QUERY}\n")
-    for outcome in (keyword, vector, hybrid):
-        print(f"-- {outcome.mode.upper()} ({outcome.meta['algorithm']}) in {outcome.ms:.1f} ms")
-        for hit in outcome.hits:
-            tail = ""
-            if outcome.mode == "keyword":
-                tail = f" coverage={hit.breakdown['coverage']} terms={hit.matched_terms[:4]}"
-            elif outcome.mode == "vector":
+    for name in ("keyword", "vector", "hybrid"):
+        block = modes[name]
+        print(f"-- {name.upper()} ({block['meta']['algorithm']}) in {block['ms']:.1f} ms")
+        for hit in block["hits"]:
+            detail = hit["breakdown"]
+            if name == "keyword":
+                tail = f" coverage={detail.get('coverage')} terms={(hit.get('matched_terms') or [])[:4]}"
+            elif detail.get("server_side"):
+                tail = f" cosine={detail.get('cosine')} model={detail.get('model')}"
+            elif "dot_product" in detail:
                 tail = (
-                    f" dot={hit.breakdown['dot_product']} ‖q‖={hit.breakdown['query_norm']} "
-                    f"‖d‖={hit.breakdown['doc_norm']} chroma_d={hit.breakdown['chroma_distance']} "
-                    f"1-d={hit.breakdown['similarity_from_distance']}"
+                    f" dot={detail['dot_product']} ‖q‖={detail['query_norm']} "
+                    f"‖d‖={detail['doc_norm']} chroma_d={detail['chroma_distance']} "
+                    f"1-d={detail['similarity_from_distance']}"
                 )
             else:
                 tail = (
-                    f" kw_rank={hit.breakdown['keyword_rank']} vec_rank={hit.breakdown['vector_rank']} "
-                    f"rrf={hit.breakdown['keyword_rrf']}+{hit.breakdown['vector_rrf']}"
+                    f" kw_rank={detail.get('keyword_rank')} vec_rank={detail.get('vector_rank')} "
+                    f"rrf={detail.get('keyword_rrf')}+{detail.get('vector_rrf')}"
                 )
-            print(f"   #{hit.rank} {hit.chunk_id} score={hit.score:.5f} p.{hit.page_start}-{hit.page_end}{tail}")
+            print(f"   #{hit['rank']} {hit['chunk_id']} score={hit['score']:.5f} p.{hit['page_start']}-{hit['page_end']}{tail}")
         print()
 
-    if not all(len(o.hits) == 3 for o in (keyword, vector, hybrid)):
+    if not all(len(modes[name]["hits"]) == 3 for name in ("keyword", "vector", "hybrid")):
         failures.append("one of the search modes returned fewer than 3 hits")
 
-    # manual cosine must agree with Chroma's stored cosine distance
-    top = vector.hits[0]
-    manual = top.breakdown["cosine"]
-    from_distance = top.breakdown["similarity_from_distance"]
-    if from_distance is not None and abs(manual - from_distance) > 1e-3:
-        failures.append(f"cosine mismatch: manual {manual} vs 1-distance {from_distance}")
+    top_detail = modes["vector"]["hits"][0]["breakdown"]
+    if top_detail.get("server_side"):
+        print(
+            f"cosine cross-check: the cluster scored the top chunk at "
+            f"{top_detail['cosine']:.6f}. Cloud Inference does not return the raw query vector, "
+            f"so the dot-product breakdown is local-only — by design, not a gap."
+        )
     else:
-        print(f"cosine cross-check: manual {manual:.6f} == 1 - chroma_distance {from_distance:.6f} OK")
+        # manual cosine must agree with Chroma's stored cosine distance
+        manual = top_detail["cosine"]
+        from_distance = top_detail["similarity_from_distance"]
+        if from_distance is not None and abs(manual - from_distance) > 1e-3:
+            failures.append(f"cosine mismatch: manual {manual} vs 1-distance {from_distance}")
+        else:
+            print(f"cosine cross-check: manual {manual:.6f} == 1 - chroma_distance {from_distance:.6f} OK")
 
-    print(f"hybrid winner: {hybrid.hits[0].chunk_id} (keyword rank {hybrid.hits[0].breakdown['keyword_rank']}, vector rank {hybrid.hits[0].breakdown['vector_rank']})")
+    winner = modes["hybrid"]["hits"][0]
+    print(
+        f"hybrid winner: {winner['chunk_id']} (keyword rank "
+        f"{winner['breakdown'].get('keyword_rank')}, vector rank {winner['breakdown'].get('vector_rank')})"
+    )
 
     header("5. GROUNDED ANSWER (Groq)")
     started = time.perf_counter()
-    result = ask(QUERY, hybrid.hits, "hybrid")
+    result = ask(QUERY, top_hits, "hybrid")
     print(f"latency          : {result['latency_ms']} ms (wall {time.perf_counter() - started:.1f}s)")
     print(f"tokens           : prompt={result['usage']['prompt_tokens']} completion={result['usage']['completion_tokens']} total={result['usage']['total_tokens']}")
     print(f"cost (config)    : ${result['cost_usd']:.8f}")
@@ -162,7 +185,7 @@ def main() -> int:
         failures.append("Groq reported 0 prompt tokens")
 
     header("6. GROUNDING REFUSAL CHECK (off-topic question)")
-    off = ask(OFF_TOPIC, hybrid.hits, "hybrid")
+    off = ask(OFF_TOPIC, top_hits, "hybrid")
     print(f"Q: {OFF_TOPIC}\nA: {off['answer'][:400]}")
     if off["grounded"]:
         failures.append("off-topic question was answered instead of refused")

@@ -69,7 +69,7 @@ paid embedding provider is involved.
 | `server/vector_store.py` | `chromadb` is now imported **lazily** (it no longer ships in the production bundle). Added `QdrantStore` implementing the same interface, and turned `get_store()` into a factory. Type hints made provider-neutral. |
 | `server/main.py` | Uses `get_embedder()` / `get_store()`. `/api/health` now returns `status`, `environment`, `groq_configured`, `embedding_provider`, `vector_store` (existing keys kept for the UI). `/api/ingest` accepts **either** the original JSON body **or** a `multipart/form-data` file upload. `_resolve_collection` maps store misconfiguration to a 503 instead of a 500. |
 | `server/ingest.py` | Uses `get_embedder()` instead of instantiating `OllamaEmbedder` directly. |
-| `requirements.txt` | Now the **Vercel** set (no `chromadb`, no `uvicorn`), plus `python-multipart` and `qdrant-client`. |
+| `requirements.txt` | Now the **Vercel** set (no `chromadb`, no `uvicorn`), plus `python-multipart` and `qdrant-client>=1.13.1` — the verified floor for the `cloud_inference` argument. |
 | `.gitignore` | Added `*.pdf` (the confidential PRD), `chroma_db/`, `.vercel`, and re-included `!.env.example`. |
 | `web/vite.config.js` | Documented the dev-vs-production proxy behaviour and added the same proxy to `vite preview`. `server.proxy` is dev-only and was never used by `vite build`. |
 | `web/src/lib/api.js` | Added `ingestFile()` (multipart; deliberately does **not** set `Content-Type` so the browser sets the boundary). | 
@@ -127,10 +127,11 @@ when searching, and the cluster generates the embedding server-side. Consequence
 
 | Setting | Value |
 | --- | --- |
-| `QDRANT_EMBED_MODEL` | `sentence-transformers/all-minilm-l6-v2` |
+| `QDRANT_EMBED_MODEL` | `sentence-transformers/all-MiniLM-L6-v2` (**canonical casing — see the note on casing below**) |
 | Dimensions | **384** for the MiniLM L6 v2 family (see the note below) |
 | Cost | $0 — a "Cost: Free" model on a free-tier cluster |
-| Region | ⚠️ **Free models are hosted in the US region only** — an EU cluster cannot use them |
+| Region | Qdrant's docs say free models are US-region only, **but this was verified working on a free
+cluster in `eu-central-1`** (see §4). Treat the Inference tab as the authority, not the region rule. |
 
 Because it is configurable, any other free Cloud Inference model works too — copy the id from the
 cluster's Inference tab, which is the authoritative source (it lists the model, its **dimensionality
@@ -169,7 +170,8 @@ Practical notes:
 
 ## 6. Production vector database — the same Qdrant cluster
 
-**Qdrant Cloud free tier**, with `qdrant-client>=1.12.0` already in `requirements.txt`. One cluster
+**Qdrant Cloud free tier**, with `qdrant-client>=1.13.1` already in `requirements.txt` (1.12.0 has no
+`cloud_inference` argument — see below). One cluster
 does both jobs: it embeds the text *and* stores the vectors.
 
 `server/vector_store.py` contains a `QdrantStore` implementing the same interface as the local
@@ -190,8 +192,8 @@ that matter:
 
 ### Setup
 
-1. Create a cluster at <https://cloud.qdrant.io> — **pick a US region**, because free embedding
-   models are only hosted there.
+1. Create a cluster at <https://cloud.qdrant.io>. A free-tier cluster in **any** region can use free
+   inference models — this was verified on `eu-central-1`, despite the docs' "US region only" note.
 2. Open **Cluster detail → Inference** and confirm it is enabled (it is by default for clusters
    created after 2025-07-07; otherwise enable it there — the cluster restarts once). Note the exact
    model id and dimensionality of a model marked **"Cost: Free"**.
@@ -222,9 +224,9 @@ nothing else in the pipeline knows which store is in use.
 | `GROQ_MODEL` | `openai/gpt-oss-120b` | |
 | `EMBEDDING_PROVIDER` | `qdrant` | Selects Qdrant Cloud Inference (free). |
 | `VECTOR_STORE` | `qdrant` | Selects the remote vector database. |
-| `QDRANT_URL` | `https://<cluster>.cloud.qdrant.io:6333` | Cluster must be in a **US region** for free models. |
+| `QDRANT_URL` | `https://<cluster>.cloud.qdrant.io:6333` | Keep the port. Free inference was verified working in `eu-central-1`. |
 | `QDRANT_API_KEY` | your cluster key | Server-side only. |
-| `QDRANT_EMBED_MODEL` | `sentence-transformers/all-minilm-l6-v2` | Any free Cloud Inference model works — copy the exact id from the Inference tab. |
+| `QDRANT_EMBED_MODEL` | `sentence-transformers/all-MiniLM-L6-v2` | Any free Cloud Inference model works — copy the exact id, **including its capitalisation**, from the Inference tab. |
 
 That is the whole list. There is **no** `OPENAI_API_KEY`, `EMBEDDING_API_KEY` or `EMBEDDING_BASE_URL`
 requirement — those settings no longer exist.
@@ -291,7 +293,9 @@ than silently degrading to something billable.
 * **Dimension mismatches** stop the request with an explicit message; the collection is never left in
   a state where scores would be meaningless (see §5).
 * The free-tier caveats that bite most often:
-  * **free embedding models are US-region only** — an EU cluster will fail to embed;
+  * Qdrant's docs claim **free embedding models are US-region only**, but this was verified working
+    on a free cluster in **`eu-central-1`** — so check your own Inference tab before recreating a
+    cluster;
   * the **cluster URL must keep its port** (`:6333`);
   * free clusters **pause after inactivity** and wake on the next request (the first call after a
     pause is simply slower, and `/api/health` is the cheapest way to wake one);
@@ -431,20 +435,21 @@ match**, which is automatic here: both sides use Qdrant Cloud Inference with the
 
 ## 11. Remaining blockers and caveats
 
-1. **No credentials are provisioned yet.** Until `QDRANT_URL` and `QDRANT_API_KEY` are added in
-   Vercel, the deployment serves the frontend and reports `status: "degraded"` with explicit
-   warnings; `/api/search` and `/api/chat` return 503 with the reason. This is intentional — the app
-   never guesses and never falls back to a paid provider.
-2. **A Vercel account, a Qdrant Cloud account (free tier, US region) and a Groq free key are
+1. **Credentials are provisioned and the cluster is verified live.** `QDRANT_URL`,
+   `QDRANT_API_KEY` and `QDRANT_EMBED_MODEL` are set in Vercel, and a free `eu-central-1` cluster was
+   exercised end to end (13 chunks → 384 dims → search → grounded answer).
+2. **A Vercel account, a Qdrant Cloud account (free tier) and a Groq free key are
    required.** I created no accounts and invented no keys.
-3. **The exact free model id and its dimensionality must be confirmed in your cluster's Inference
-   tab.** `sentence-transformers/all-minilm-l6-v2` appears in Qdrant's own documentation and the
-   MiniLM-L6-v2 family is 384-dimensional, but Qdrant publishes **no API to list which models are
-   free**, and no hosted-model dimension table — so the console is the authority. `QDRANT_EMBED_MODEL`
-   exists precisely so no id is hard-coded here, and the width is validated against the collection (or
-   discovered with a probe) instead of assumed.
-4. **Free models are US-region only.** An EU cluster cannot use them; recreate the cluster in a US
-   region if inference fails with a region/availability error.
+3. **The free model id and its dimensionality are confirmed**: `sentence-transformers/all-MiniLM-L6-v2`,
+   **384** dims, `Cost: Free`, read from the cluster's Inference tab. Qdrant publishes **no API to
+   list which models are free** and no hosted-model dimension table, so the console stays the
+   authority; `QDRANT_EMBED_MODEL` exists precisely so no id is hard-coded, and the width is
+   validated against the collection (or discovered with a probe) instead of assumed.
+4. **The model id must match character-for-character between environments.**
+   `QDRANT_EMBED_MODEL` feeds the collection fingerprint, so `all-minilm-l6-v2` and
+   `all-MiniLM-L6-v2` produce **different collections** (`prd_5c984dcf_…` vs `prd_484ef176_…`). Use
+   the console's exact spelling everywhere, or local and deployed will appear to hold
+different documents.
 5. **First build must be watched once.** `vercel.json` sets a build command but deliberately not an
    `installCommand`, so Vercel's Python dependency install (`requirements.txt`) is untouched. Confirm
    in the build log that `requirements.txt` was installed and that `web/dist` was produced. If Vite
@@ -459,7 +464,38 @@ match**, which is automatic here: both sides use Qdrant Cloud Inference with the
    `vercel` or `vercel --prod`, so the platform-side wiring is verified against Vercel's documented
    FastAPI/Python runtime behaviour rather than a live deployment. The `api_smoke.py --url` check
    exists precisely to confirm it in one command after the first preview deploy.
-9. **The Qdrant Cloud Inference path is verified against a stub, not a live cluster.** The 30
-   assertions in `scripts/test_qdrant_inference.py` exercise the real code (Inference Objects, model
-   selection, dimension discovery, error mapping) with a fake client; the live network call, the
-   console's model list and the region constraint can only be confirmed with your credentials.
+9. **The inference path is verified both against a stub and live.** `scripts/test_qdrant_inference.py`
+   has 46 assertions over the real code with a stubbed cluster (no credentials, no network — including
+   a regression check that fails if the production client is ever built without `cloud_inference`),
+   and `scripts/selfcheck.py` / `scripts/api_smoke.py` were run against the real cluster.
+
+---
+
+## 12. The first production bug — fixed (`cloud_inference`)
+
+The first deployed ingest failed at the **store** stage with:
+
+```
+The inference model is not available on this cluster for embed and store rows 0-32.
+sentence-transformers/all-MiniLM-L6-v2 is not found among supported models.
+Check if `cloud_inference` is set to True or `fastembed` is installed (for local inference?)
+```
+
+The model was free and available; the message was about the **client**. `QdrantClient`'s
+`cloud_inference` argument **defaults to `False`**, and with it off every SDK method takes a
+`if not self.cloud_inference and <a Document is detected>` branch — embedding *locally* through
+FastEmbed, which is deliberately not a dependency. Passing `cloud_inference=True` makes the cluster do
+the work. `server/vector_store.py` now derives it from `EMBEDDING_PROVIDER=qdrant`, so there is one
+Cloud-Inference-enabled client behind the dimension probe, collection creation, upsert, query and
+search.
+
+Two things this exposed:
+
+* `requirements.txt` had `qdrant-client>=1.12.0`, and **1.12.0 has no `cloud_inference` argument**
+  (verified by unpacking the wheels for 1.12.0 / 1.13.1 / 1.14.0). The floor is now `>=1.13.1`.
+* `friendly_qdrant_error()` matched `"not found" + "model"` first, so it rewrote the real cause as
+  "the inference model is not available on this cluster" — pointing at a model that was fine. The
+  FastEmbed/`cloud_inference` symptom now has its own branch *before* that one.
+
+A leftover 0-row collection from the failed ingest may still be in the cluster; delete it from the
+UI's document list.

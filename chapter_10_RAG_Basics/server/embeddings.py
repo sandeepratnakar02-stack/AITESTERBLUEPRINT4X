@@ -271,9 +271,11 @@ class QdrantInferenceEmbedder:
         result["model_present"] = True
         result["ok"] = True
         result["note"] = (
-            'Verify the model is labelled "Cost: Free" in the Inference tab of your cluster; free '
-            "embedding models are hosted in the US region only. Dimensions are read from the "
-            "collection (or the vectors it produced) rather than assumed."
+            'Verify the model is labelled "Cost: Free" in the Inference tab of your cluster. (The '
+            "docs say free models are US-region only, but free inference has been verified working "
+            "on a free cluster in eu-central-1.) Embeddings are produced by the cluster with this "
+            "model; dimensions are read from the collection (or the vectors it produced) rather "
+            "than assumed."
         )
         return result
 

@@ -290,6 +290,18 @@ def friendly_qdrant_error(exc: Exception, action: str) -> str:
             f"Qdrant Cloud rate-limited {action}. The free tier has request limits — retry in a "
             f"moment, or ingest the document locally (see DEPLOYMENT.md §9d). ({message[:200]})"
         )
+    # The SDK's *local* inference path. This is not a cluster or model problem at all: it means the
+    # client was created without ``cloud_inference=True`` and tried to embed on the machine. Say so,
+    # instead of blaming the cluster's model list (which is what an earlier version of this
+    # function did, and it sent the operator hunting for a model that was already available).
+    if "fastembed" in lowered or "local inference" in lowered or "cloud_inference" in lowered:
+        return (
+            f"Qdrant Cloud could not {action}: the client tried to embed locally instead of using "
+            f"Cloud Inference. This is a client configuration problem, not a missing model — "
+            f"QdrantClient must be built with cloud_inference=True, which this project derives from "
+            f"EMBEDDING_PROVIDER=qdrant. Nothing is installed or downloaded locally and no other "
+            f"embedding provider is used. ({message[:200]})"
+        )
     if "not found" in lowered and "model" in lowered:
         return (
             f"The inference model is not available on this cluster for {action}. Copy the exact model "
@@ -307,6 +319,10 @@ class QdrantStore:
 
     Embeddings are produced by the cluster itself (Cloud Inference), so the text is sent as an
     inference object instead of a vector — see :class:`server.embeddings.QdrantInferenceEmbedder`.
+
+    Exactly **one** client is created here, and every operation (dimension probe, collection
+    creation, upsert, query) goes through it, so they cannot disagree about how a
+    :class:`qdrant_client.models.Document` is turned into a vector.
 
     The ingestion config the UI needs is stored as collection metadata (``create_collection`` gained
     a ``metadata`` argument in qdrant-client 1.16, readable back via ``config.metadata``). Older
@@ -343,8 +359,21 @@ class QdrantStore:
             ) from exc
 
         self.models = models
+        # ``cloud_inference`` defaults to **False**, and that default silently switches the SDK to
+        # *local* inference: it hands ``models.Document`` to FastEmbed (which this project
+        # deliberately does not install) and fails with
+        #   "<model> is not found among supported models. Check if `cloud_inference` is set to True
+        #    or `fastembed` is installed (for local inference?)"
+        # Even though the model is perfectly available on a free cluster. With the flag on, the
+        # Document objects are forwarded to the cluster, which embeds them server-side — no
+        # FastEmbed, no sentence-transformers, no model download, no extra provider key.
         try:
-            self.client = QdrantClient(url=self.url, api_key=self.api_key, timeout=cfg.qdrant_timeout)
+            self.client = QdrantClient(
+                url=self.url,
+                api_key=self.api_key,
+                timeout=cfg.qdrant_timeout,
+                cloud_inference=cfg.uses_cloud_inference,
+            )
         except Exception as exc:  # noqa: BLE001
             raise VectorStoreError(f"Could not create a Qdrant client for {self.hostname}: {exc}") from exc
 
