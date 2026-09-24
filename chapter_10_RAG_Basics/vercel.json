@@ -1,0 +1,11 @@
+{
+  "$schema": "https://openapi.vercel.sh/vercel.json",
+  "buildCommand": "npm --prefix web install --no-audit --no-fund && npm --prefix web run build",
+  "functions": {
+    "api/index.py": {
+      "maxDuration": 60,
+      "memory": 1024,
+      "excludeFiles": "{.venv/**,.chroma/**,**/node_modules/**,**/__pycache__/**,.git/**,**/*.pdf,scripts/**,plan.md,DEPLOYMENT.md,README.md}"
+    }
+  }
+}

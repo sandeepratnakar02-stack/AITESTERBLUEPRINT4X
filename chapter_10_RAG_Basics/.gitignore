@@ -1,0 +1,29 @@
+# Python
+.venv/
+__pycache__/
+*.pyc
+
+# Secrets. NOTE: the repo root .gitignore also has `.env*`, so .env.example is explicitly
+# re-included below — a deeper .gitignore takes precedence over a shallower one.
+.env
+.env.local
+!.env.example
+
+# Confidential source documents — this chapter's PRD must never be committed
+*.pdf
+
+# Vector store data (local ChromaDB; production uses a remote Qdrant cluster)
+.chroma/
+chroma_db/
+
+# Vercel
+.vercel
+
+# Node / Vite
+node_modules/
+dist/
+.vite/
+
+# Local scratch
+*.log
+selfcheck-out.json

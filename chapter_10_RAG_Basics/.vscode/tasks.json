@@ -1,0 +1,49 @@
+{
+	"version": "2.0.0",
+	"tasks": [
+		{
+			"label": "RAG: 1 · setup venv + deps (local)",
+			"type": "shell",
+			"command": "uv venv --python 3.13 .venv && uv pip install --python .venv/Scripts/python.exe -r requirements-local.txt",
+			"options": { "cwd": "${workspaceFolder}" },
+			"problemMatcher": []
+		},
+		{
+			"label": "RAG: 2 · run API (port 8011)",
+			"type": "shell",
+			"command": ".venv/Scripts/python.exe -m uvicorn server.main:app --host 127.0.0.1 --port 8011 --reload",
+			"options": { "cwd": "${workspaceFolder}" },
+			"isBackground": true,
+			"problemMatcher": []
+		},
+		{
+			"label": "RAG: 3 · run UI (port 5190)",
+			"type": "shell",
+			"command": "npm --prefix web run dev",
+			"options": { "cwd": "${workspaceFolder}" },
+			"isBackground": true,
+			"problemMatcher": []
+		},
+		{
+			"label": "RAG: selfcheck (no UI, no HTTP)",
+			"type": "shell",
+			"command": ".venv/Scripts/python.exe scripts/selfcheck.py",
+			"options": { "cwd": "${workspaceFolder}" },
+			"problemMatcher": []
+		},
+		{
+			"label": "RAG: api smoke test (all routes)",
+			"type": "shell",
+			"command": ".venv/Scripts/python.exe scripts/api_smoke.py",
+			"options": { "cwd": "${workspaceFolder}" },
+			"problemMatcher": []
+		},
+		{
+			"label": "RAG: qdrant inference unit tests",
+			"type": "shell",
+			"command": ".venv/Scripts/python.exe scripts/test_qdrant_inference.py",
+			"options": { "cwd": "${workspaceFolder}" },
+			"problemMatcher": []
+		}
+	]
+}

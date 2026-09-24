@@ -1,0 +1,30 @@
+# Files that must never be uploaded to Vercel.
+#
+# Applied relative to the Vercel "Root Directory" (chapter_10_RAG_Basics). The two most important
+# entries are the confidential PDF and the secrets file: neither should leave this machine, and the
+# vector store directory is regenerated per environment.
+#
+# Note: for Git deployments the strongest guarantee is that these files are also in .gitignore, so
+# they are never committed in the first place.
+
+# --- never leave this machine ------------------------------------------------
+*.pdf
+.env
+.env.local
+
+# --- environment-specific data ----------------------------------------------
+.chroma/
+chroma_db/
+.vercel/
+
+# --- rebuildable / regenerated ----------------------------------------------
+.venv/
+**/__pycache__/
+**/*.pyc
+web/node_modules/
+web/dist/
+
+# --- local-only tooling and docs --------------------------------------------
+scripts/
+plan.md
+*.log

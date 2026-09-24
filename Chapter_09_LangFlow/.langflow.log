@@ -1,0 +1,25 @@
+[2m2026-09-11T15:11:02.499560Z[0m [[33m[1mwarning  [0m] [1mCORS: Using permissive defaults (all origins + credentials). Set LANGFLOW_CORS_ORIGINS for production. Stricter defaults in v2.0.[0m [[0m[1m[34mlangflow.__main__[0m][0m [36mservice[0m=[35mlangflow[0m
+[2m2026-09-11T15:11:02.503719Z[0m [[33m[1mwarning  [0m] [1mCORS: wildcard origin ('*') is configured together with LANGFLOW_CORS_ALLOW_CREDENTIALS=true; disabling credentials because a wildcard origin with credentials enables cross-site credentialed requests (CSRF / token theft) and is invalid per the CORS spec. Set LANGFLOW_CORS_ORIGINS to explicit origins to keep credentials enabled.[0m [[0m[1m[34mlangflow.__main__[0m][0m [36mservice[0m=[35mlangflow[0m
+HTTP Request: GET https://pypi.org/pypi/langflow/json "HTTP/1.1 200 OK"
+Context impl SQLiteImpl.
+Will assume non-transactional DDL.
+Context impl SQLiteImpl.
+Will assume non-transactional DDL.
+setting up autogenerate plugin alembic.autogenerate.schemas
+setting up autogenerate plugin alembic.autogenerate.tables
+setting up autogenerate plugin alembic.autogenerate.types
+setting up autogenerate plugin alembic.autogenerate.constraints
+setting up autogenerate plugin alembic.autogenerate.defaults
+setting up autogenerate plugin alembic.autogenerate.comments
+Context impl SQLiteImpl.
+Will assume non-transactional DDL.
+setting up autogenerate plugin alembic.autogenerate.schemas
+setting up autogenerate plugin alembic.autogenerate.tables
+setting up autogenerate plugin alembic.autogenerate.types
+setting up autogenerate plugin alembic.autogenerate.constraints
+setting up autogenerate plugin alembic.autogenerate.defaults
+setting up autogenerate plugin alembic.autogenerate.comments
+[2m2026-09-11T15:11:15.696892Z[0m [[31m[1merror    [0m] [1mFailed to start telemetry writer; transactions and vertex_build writes will use the legacy direct-write path: [WinError 11] An attempt was made to load a program with an incorrect format[0m [[0m[1m[34mlangflow.__main__[0m][0m [36mservice[0m=[35mlangflow[0m
+[2m2026-09-11T15:11:30.521671Z[0m [[33m[1mwarning  [0m] [1mSkipping starter project 'Research Translation Loop'; unavailable components: ArXivComponent[0m [[0m[1m[34mlangflow.__main__[0m][0m [36mservice[0m=[35mlangflow[0m
+[2m2026-09-11T15:11:30.735697Z[0m [[32m[1minfo     [0m] [1mInitializing agentic global variables...[0m [[0m[1m[34mlangflow.__main__[0m][0m [36mservice[0m=[35mlangflow[0m
+StreamableHTTP session manager started

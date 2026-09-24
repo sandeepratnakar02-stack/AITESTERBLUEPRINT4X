@@ -1,0 +1,14 @@
+# Chapter 10 — PRD RAG Explorer · LOCAL DEVELOPMENT dependencies
+#
+#   uv pip install -r requirements-local.txt
+#
+# Everything the production set has, plus:
+#   * chromadb — the embedded vector store used when VECTOR_STORE=chroma (the default locally)
+#   * uvicorn  — the local ASGI server (`python -m uvicorn server.main:app --port 8011`)
+#
+# Vercel installs requirements.txt only, so ChromaDB and uvicorn never reach the deployment bundle.
+
+-r requirements.txt
+
+chromadb==1.5.9
+uvicorn[standard]>=0.30.0
