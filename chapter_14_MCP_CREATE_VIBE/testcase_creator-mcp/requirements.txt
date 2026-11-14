@@ -1,0 +1,5 @@
+# Runtime dependency. Python >= 3.10 (verified on 3.13.15).
+fastmcp>=4.1.0
+
+# Dev/test only:
+# pytest>=8

@@ -1,0 +1,22 @@
+{
+  "servers": {
+    "principle-instructor": {
+      "type": "http",
+      "url": "https://principle-instructor-rendering-break.trycloudflare.com/mcp"
+    },
+    "testcase-creator": {
+      "type": "stdio",
+      "command": "c:\\AITESTERBLUEPRINT4X\\chapter_14_MCP_CREATE_VIBE\\testcase_creator-mcp\\.venv\\Scripts\\python.exe",
+      "args": [
+        "c:\\AITESTERBLUEPRINT4X\\chapter_14_MCP_CREATE_VIBE\\testcase_creator-mcp\\server.py"
+      ]
+    },
+    "testskill-finder": {
+      "type": "stdio",
+      "command": "c:\\AITESTERBLUEPRINT4X\\chapter_14_MCP_CREATE_VIBE\\testskill_finder-mcp\\.venv\\Scripts\\python.exe",
+      "args": [
+        "c:\\AITESTERBLUEPRINT4X\\chapter_14_MCP_CREATE_VIBE\\testskill_finder-mcp\\server.py"
+      ]
+    }
+  }
+}

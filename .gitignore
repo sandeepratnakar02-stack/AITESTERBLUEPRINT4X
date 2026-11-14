@@ -1,2 +1,4 @@
 .vercel
 .env*
+# MCP Inspector server configs (may contain tokens/API keys)
+*-mcp.json

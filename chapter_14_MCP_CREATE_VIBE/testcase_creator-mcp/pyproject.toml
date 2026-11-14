@@ -1,0 +1,26 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "testcase-creator-mcp"
+version = "0.1.0"
+description = "Read-only MCP server that turns the VWO test-case CSV into queryable Test Creator tools (FastMCP)."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+dependencies = ["fastmcp>=4.1.0"]
+
+[project.optional-dependencies]
+dev = ["pytest>=8"]
+
+[project.scripts]
+testcase-creator-mcp = "server:main"
+
+# Flat layout: two top-level modules, no package directory needed.
+[tool.setuptools]
+py-modules = ["server", "dataset"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
